@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Local-only app by design (see PROJECT_CONTEXT.md) — Room DB is safe to back up. -->
+</full-backup-content>

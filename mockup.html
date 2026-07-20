@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>STATIC — internet radio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders:wght@600;800&family=IBM+Plex+Mono:wght@400;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --concrete: #E7E2D6;
+    --concrete-2: #D9D2C1;
+    --ink: #17171450;
+    --line: #141412;
+    --rebar: #FF4713;
+    --rebar-dim: #FF471322;
+    --aggregate: #B7AE99;
+    --signal: #CFEE2E;
+    --text: #14140F;
+    --text-dim: #55503f;
+    --surface: #F1EDE2;
+    --radius-lg: 22px;
+    --radius-md: 14px;
+    --radius-sm: 8px;
+  }
+  [data-theme="dark"] {
+    --concrete: #17171A;
+    --concrete-2: #201F1C;
+    --line: #E7E2D6;
+    --rebar: #FF5A29;
+    --rebar-dim: #FF5A2933;
+    --aggregate: #4A473E;
+    --signal: #D8FF3D;
+    --text: #EDE8DA;
+    --text-dim: #9A9482;
+    --surface: #1D1C18;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Inter', sans-serif;
+    background: var(--concrete);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    transition: background .25s, color .25s;
+  }
+
+  .device {
+    width: 100%;
+    max-width: 430px;
+    min-height: 100vh;
+    background: var(--concrete);
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    background-image:
+      linear-gradient(var(--concrete-2) 1px, transparent 1px),
+      linear-gradient(90deg, var(--concrete-2) 1px, transparent 1px);
+    background-size: 28px 28px;
+    background-position: -1px -1px;
+  }
+
+  /* ---------- HEADER ---------- */
+  .topbar {
+    padding: 20px 18px 14px;
+    background: var(--concrete);
+    border-bottom: 3px solid var(--line);
+  }
+  .wordmark {
+    font-family: 'Big Shoulders', sans-serif;
+    font-weight: 800;
+    font-size: 34px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .wordmark .dot {
+    width: 12px; height: 12px;
+    background: var(--rebar);
+    border-radius: 50%;
+    box-shadow: 0 0 0 3px var(--rebar-dim);
+  }
+  .subhead {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-top: 4px;
+  }
+
+  .controls-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 16px;
+  }
+
+  .segmented {
+    display: flex;
+    border: 2px solid var(--line);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+  .segmented button {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    background: var(--surface);
+    color: var(--text);
+    border: none;
+    padding: 8px 14px;
+    cursor: pointer;
+  }
+  .segmented button.active {
+    background: var(--rebar);
+    color: #17171A;
+  }
+  .segmented button:not(:last-child) { border-right: 2px solid var(--line); }
+
+  .icon-btn {
+    width: 38px; height: 38px;
+    border: 2px solid var(--line);
+    border-radius: 50%;
+    background: var(--surface);
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    font-size: 16px;
+  }
+
+  .tag-row {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    margin-top: 14px;
+    padding-bottom: 4px;
+  }
+  .tag-row::-webkit-scrollbar { display: none; }
+  .chip {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10.5px;
+    letter-spacing: .5px;
+    text-transform: uppercase;
+    white-space: nowrap;
+    padding: 7px 12px;
+    border: 2px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .chip.active { background: var(--text); color: var(--concrete); }
+
+  /* ---------- MAIN AREA ---------- */
+  .main {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 14px 180px;
+  }
+
+  /* Station card shared plate styling */
+  .plate {
+    position: relative;
+    border: 2.5px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+  }
+  .plate::before, .plate::after {
+    content: '';
+    position: absolute;
+    top: 8px;
+    width: 5px; height: 5px;
+    background: var(--line);
+    border-radius: 50%;
+    opacity: .55;
+  }
+  .plate::before { left: 8px; }
+  .plate::after { right: 8px; }
+
+  .idcode {
+    position: absolute;
+    top: -9px; left: 14px;
+    background: var(--text);
+    color: var(--concrete);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 1px;
+    padding: 2px 7px;
+    border-radius: 4px;
+  }
+
+  .pop-badge {
+    position: absolute;
+    top: -10px; right: 12px;
+    font-size: 15px;
+    background: var(--surface);
+    border: 2px solid var(--line);
+    border-radius: 50%;
+    width: 26px; height: 26px;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  /* LIST VIEW */
+  .list-view .plate {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    margin-bottom: 14px;
+    cursor: pointer;
+  }
+  .list-view .art {
+    width: 52px; height: 52px;
+    border-radius: var(--radius-sm);
+    border: 2px solid var(--line);
+    flex-shrink: 0;
+  }
+  .list-view .meta { flex: 1; min-width: 0; }
+  .list-view .title {
+    font-weight: 700;
+    font-size: 15px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .list-view .sub {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 2px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .fav-mark { font-size: 16px; flex-shrink: 0; }
+
+  /* GRID VIEW */
+  .grid-view {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+  }
+  .grid-view .plate {
+    padding: 8px;
+    cursor: pointer;
+  }
+  .grid-view .art {
+    width: 100%;
+    aspect-ratio: 1;
+    border: 2px solid var(--line);
+  }
+  .art.shape-circle { border-radius: 50%; }
+  .art.shape-square { border-radius: 4px; }
+  .art.shape-rounded { border-radius: 16px; }
+
+  /* ---------- MAP VIEW ---------- */
+  .map-view {
+    position: relative;
+    height: 100%;
+    min-height: 520px;
+    border: 2.5px solid var(--line);
+    border-radius: var(--radius-md);
+    background:
+      repeating-linear-gradient(0deg, #00000012 0 1px, transparent 1px 26px),
+      repeating-linear-gradient(90deg, #00000012 0 1px, transparent 1px 26px),
+      linear-gradient(160deg, #cfcabb, #a7a290);
+    filter: grayscale(1);
+    overflow: hidden;
+  }
+  [data-theme="dark"] .map-view {
+    background:
+      repeating-linear-gradient(0deg, #ffffff10 0 1px, transparent 1px 26px),
+      repeating-linear-gradient(90deg, #ffffff10 0 1px, transparent 1px 26px),
+      linear-gradient(160deg, #26241f, #100f0d);
+  }
+  .pin {
+    position: absolute;
+    width: 40px; height: 48px;
+    transform: translate(-50%, -100%);
+    cursor: pointer;
+  }
+  .pin .drop {
+    width: 40px; height: 40px;
+    background: var(--rebar);
+    border: 2.5px solid var(--line);
+    border-radius: 50% 50% 50% 0;
+    transform: rotate(-45deg);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .pin .drop img, .pin .drop .art-inner {
+    transform: rotate(45deg);
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    border: 1.5px solid var(--line);
+  }
+
+  /* ---------- SETTINGS ---------- */
+  .settings-section {
+    margin-bottom: 22px;
+  }
+  .settings-section h3 {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 10px;
+    border-bottom: 2px solid var(--line);
+    padding-bottom: 6px;
+  }
+  .setting-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--concrete-2);
+  }
+  .option-group { display: flex; gap: 8px; }
+  .option-btn {
+    border: 2px solid var(--line);
+    background: var(--surface);
+    padding: 7px 12px;
+    border-radius: var(--radius-sm);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .option-btn.active { background: var(--rebar); color: #17171A; }
+
+  .toggle-switch {
+    width: 46px; height: 26px;
+    background: var(--aggregate);
+    border: 2px solid var(--line);
+    border-radius: 999px;
+    position: relative;
+    cursor: pointer;
+  }
+  .toggle-switch .knob {
+    position: absolute;
+    top: 1px; left: 1px;
+    width: 18px; height: 18px;
+    background: var(--surface);
+    border: 2px solid var(--line);
+    border-radius: 50%;
+    transition: transform .18s;
+  }
+  .toggle-switch.on { background: var(--rebar); }
+  .toggle-switch.on .knob { transform: translateX(20px); }
+
+  /* ---------- PERSISTENT PLAYER BAR ---------- */
+  .player-bar {
+    position: fixed;
+    bottom: 74px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 100%;
+    max-width: 430px;
+    padding: 0 10px;
+    z-index: 40;
+    display: none;
+  }
+  .player-bar.visible { display: block; }
+  .player-bar-inner {
+    background: var(--text);
+    color: var(--concrete);
+    border: 2.5px solid var(--line);
+    border-radius: var(--radius-md);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    cursor: pointer;
+    box-shadow: 5px 5px 0 var(--rebar-dim);
+  }
+  .player-bar .art {
+    width: 42px; height: 42px;
+    border-radius: var(--radius-sm);
+    border: 2px solid var(--concrete);
+    flex-shrink: 0;
+  }
+  .player-bar .meta { flex: 1; min-width: 0; }
+  .player-bar .title {
+    font-weight: 700; font-size: 13.5px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .player-bar .sub {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10.5px;
+    color: #cfc9b8;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .bar-btn {
+    width: 34px; height: 34px;
+    border-radius: 50%;
+    border: 2px solid var(--concrete);
+    background: transparent;
+    color: var(--concrete);
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+    font-size: 14px;
+  }
+  .bar-btn.play { background: var(--rebar); border-color: var(--line); color: #17171A; }
+  .onair-led {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--signal);
+    box-shadow: 0 0 6px var(--signal);
+    flex-shrink: 0;
+    animation: pulse 1.4s infinite;
+  }
+  @keyframes pulse { 50% { opacity: .3; } }
+
+  /* ---------- BOTTOM NAV ---------- */
+  .bottom-nav {
+    position: fixed;
+    bottom: 0; left: 50%;
+    transform: translateX(-50%);
+    width: 100%;
+    max-width: 430px;
+    display: flex;
+    background: var(--surface);
+    border-top: 3px solid var(--line);
+    z-index: 40;
+  }
+  .nav-btn {
+    flex: 1;
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+    padding: 10px 0 12px;
+    background: none; border: none;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px; letter-spacing: 1px; text-transform: uppercase;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .nav-btn.active { color: var(--rebar); }
+  .nav-btn .icon { font-size: 19px; }
+
+  /* ---------- FULL PLAYER SHEET ---------- */
+  .sheet-backdrop {
+    position: fixed; inset: 0;
+    background: #000000aa;
+    z-index: 50;
+    display: none;
+    justify-content: center;
+  }
+  .sheet-backdrop.open { display: flex; }
+  .sheet {
+    width: 100%; max-width: 430px;
+    background: var(--concrete);
+    align-self: flex-end;
+    border-radius: 26px 26px 0 0;
+    border: 3px solid var(--line);
+    border-bottom: none;
+    padding: 10px 22px 32px;
+    max-height: 88vh;
+    overflow-y: auto;
+  }
+  .sheet-handle {
+    width: 44px; height: 5px;
+    background: var(--line);
+    border-radius: 3px;
+    margin: 6px auto 18px;
+  }
+  .sheet .art-lg {
+    width: 100%; aspect-ratio: 1;
+    border-radius: var(--radius-lg);
+    border: 3px solid var(--line);
+    margin-bottom: 18px;
+  }
+  .sheet .title-lg {
+    font-family: 'Big Shoulders', sans-serif;
+    font-weight: 800;
+    font-size: 28px;
+    text-transform: uppercase;
+    line-height: 1.05;
+  }
+  .sheet .now-playing {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12.5px;
+    color: var(--rebar);
+    margin-top: 8px;
+    display: flex; align-items: center; gap: 7px;
+  }
+  .sheet .desc {
+    margin-top: 14px;
+    font-size: 13.5px;
+    color: var(--text-dim);
+    line-height: 1.5;
+  }
+  .sheet .tag-row { margin-top: 14px; }
+  .sheet .info-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 16px;
+  }
+  .info-cell {
+    border: 2px solid var(--line);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    background: var(--surface);
+  }
+  .info-cell .k {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 9.5px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  .info-cell .v { font-weight: 600; font-size: 13px; margin-top: 2px; }
+
+  .sheet-transport {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 22px;
+    margin-top: 22px;
+  }
+  .sheet-transport .big-btn {
+    width: 62px; height: 62px;
+    border-radius: 50%;
+    background: var(--rebar);
+    border: 3px solid var(--line);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 24px;
+    cursor: pointer;
+  }
+  .sheet-transport .small-btn {
+    width: 44px; height: 44px;
+    border-radius: 50%;
+    border: 2.5px solid var(--line);
+    background: var(--surface);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 17px;
+    cursor: pointer;
+  }
+  .sheet-close {
+    position: absolute;
+    top: 16px; right: 20px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    border: 2px solid var(--line);
+    border-radius: 999px;
+    padding: 6px 12px;
+    background: var(--surface);
+    cursor: pointer;
+  }
+
+  .view-panel { display: none; }
+  .view-panel.active { display: block; }
+</style>
+</head>
+<body>
+
+<div class="device" id="device">
+
+  <div class="topbar">
+    <div class="wordmark"><span class="dot"></span>STATIC</div>
+    <div class="subhead">// user-curated shortwave &amp; net radio</div>
+
+    <div class="controls-row">
+      <div class="segmented">
+        <button id="btnList" class="active">List</button>
+        <button id="btnGrid">Grid</button>
+      </div>
+      <div class="icon-btn" id="themeToggle">☾</div>
+    </div>
+
+    <div class="tag-row" id="tagRow"></div>
+  </div>
+
+  <!-- HOME -->
+  <div class="view-panel active" id="panel-home">
+    <div class="main">
+      <div id="listView" class="list-view"></div>
+      <div id="gridView" class="grid-view" style="display:none;"></div>
+    </div>
+  </div>
+
+  <!-- MAP -->
+  <div class="view-panel" id="panel-map">
+    <div class="main" style="padding-bottom:160px;">
+      <div class="map-view" id="mapView"></div>
+    </div>
+  </div>
+
+  <!-- SETTINGS -->
+  <div class="view-panel" id="panel-settings">
+    <div class="main">
+      <div class="settings-section">
+        <h3>Appearance</h3>
+        <div class="setting-row">
+          <span>Dark mode</span>
+          <div class="toggle-switch" id="darkToggle"><div class="knob"></div></div>
+        </div>
+        <div class="setting-row">
+          <span>Accent</span>
+          <div class="option-group">
+            <div class="option-btn active" data-accent="#FF4713" style="background:#FF4713;color:#17171A;">rebar</div>
+            <div class="option-btn" data-accent="#3D6BFF" style="background:#3D6BFF;color:#fff;">signal-blue</div>
+            <div class="option-btn" data-accent="#CFEE2E" style="background:#CFEE2E;color:#17171A;">hazard</div>
+          </div>
+        </div>
+      </div>
+      <div class="settings-section">
+        <h3>Grid image shape</h3>
+        <div class="setting-row">
+          <span>Station artwork</span>
+          <div class="option-group">
+            <div class="option-btn" data-shape="shape-circle">circle</div>
+            <div class="option-btn active" data-shape="shape-square">square</div>
+            <div class="option-btn" data-shape="shape-rounded">rounded</div>
+          </div>
+        </div>
+      </div>
+      <div class="settings-section">
+        <h3>Tag vocabulary</h3>
+        <div class="setting-row"><span>Dark Ambient</span><span style="color:var(--text-dim);font-size:12px;">genre</span></div>
+        <div class="setting-row"><span>Noise</span><span style="color:var(--text-dim);font-size:12px;">genre</span></div>
+        <div class="setting-row"><span>Pirate</span><span style="color:var(--text-dim);font-size:12px;">genre</span></div>
+        <div class="setting-row"><span>+ Add tag…</span><span style="color:var(--rebar);font-size:12px;">edit</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PERSISTENT PLAYER BAR -->
+  <div class="player-bar" id="playerBar">
+    <div class="player-bar-inner" id="playerBarInner">
+      <div class="art" id="barArt"></div>
+      <div class="meta">
+        <div class="title" id="barTitle">—</div>
+        <div class="sub" id="barSub">—</div>
+      </div>
+      <div class="onair-led" id="barLed" style="display:none;"></div>
+      <button class="bar-btn" id="barShuffle" title="Random station">⤭</button>
+      <button class="bar-btn play" id="barPlay">▶</button>
+    </div>
+  </div>
+
+  <!-- BOTTOM NAV -->
+  <div class="bottom-nav">
+    <button class="nav-btn active" data-tab="home"><span class="icon">▤</span>Home</button>
+    <button class="nav-btn" data-tab="map"><span class="icon">◎</span>Map</button>
+    <button class="nav-btn" data-tab="settings"><span class="icon">⚙</span>Settings</button>
+  </div>
+
+  <!-- FULL PLAYER SHEET -->
+  <div class="sheet-backdrop" id="sheetBackdrop">
+    <div class="sheet">
+      <div class="sheet-close" id="sheetClose">CLOSE</div>
+      <div class="sheet-handle"></div>
+      <div class="art-lg" id="sheetArt"></div>
+      <div class="title-lg" id="sheetTitle">—</div>
+      <div class="now-playing" id="sheetNowPlaying"><span class="onair-led"></span> <span id="sheetNowPlayingText">—</span></div>
+      <div class="desc" id="sheetDesc">—</div>
+      <div class="tag-row" id="sheetTags"></div>
+      <div class="info-grid" id="sheetInfo"></div>
+      <div class="sheet-transport">
+        <div class="small-btn" id="sheetShuffle">⤭</div>
+        <div class="big-btn" id="sheetPlay">▶</div>
+        <div class="small-btn" id="sheetFav">♡</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ---------- SAMPLE DATA ----------
+const GENRES = ["Dark Ambient","Noise","Dub","Post-Punk","Drone","Numbers","Pirate","Field Recording"];
+
+function genArt(seed, c1, c2) {
+  const shapes = ['<circle cx="50" cy="50" r="38"/>','<rect x="14" y="14" width="72" height="72"/>','<polygon points="50,8 92,88 8,88"/>'];
+  const shape = shapes[seed % shapes.length];
+  return `data:image/svg+xml;utf8,${encodeURIComponent(`
+    <svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>
+      <rect width='100' height='100' fill='${c1}'/>
+      <g fill='${c2}' transform='rotate(${(seed*37)%360} 50 50)'>${shape}</g>
+    </svg>`)}`;
+}
+
+const PALETTE = [["#1D1C18","#FF4713"],["#3D6BFF","#EDE8DA"],["#CFEE2E","#14140F"],["#B7AE99","#17171A"],["#FF4713","#F1EDE2"]];
+
+const STATIONS = [
+  {id:1, title:"Radio Vult", genre:"Dark Ambient", country:"NO", bitrate:128, lat:59.9,lon:10.7, pop:"🌋", fav:true, desc:"Cavernous drones and field-recorded rot, streamed from a basement outside Oslo."},
+  {id:2, title:"Static Mass", genre:"Noise", country:"JP", bitrate:96, lat:35.6,lon:139.7, pop:"🔥", fav:false, desc:"Harsh wall noise, unmoderated, since 2011. No DJ, no schedule."},
+  {id:3, title:"Dub Cartel Intl", genre:"Dub", country:"JM", bitrate:192, lat:18.0,lon:-76.8, pop:"🧊", fav:false, desc:"Deep dub selections and unreleased dubplates from a rotating cast of selectors."},
+  {id:4, title:"Concrete & Chrome", genre:"Post-Punk", country:"DE", bitrate:160, lat:52.5,lon:13.4, pop:"😐", fav:true, desc:"Post-punk and cold wave out of a squat venue in Berlin."},
+  {id:5, title:"Longwave Drift", genre:"Drone", country:"IS", bitrate:128, lat:64.1,lon:-21.9, pop:"❄️", fav:false, desc:"Single unbroken drone composition, changes once a month."},
+  {id:6, title:"Numbers Only", genre:"Numbers", country:"CU", bitrate:64, lat:23.1,lon:-82.3, pop:"🔥", fav:false, desc:"Archived shortwave numbers station recordings, looped."},
+  {id:7, title:"Skiff Pirate FM", genre:"Pirate", country:"UK", bitrate:128, lat:51.5,lon:-0.1, pop:"🌋", fav:true, desc:"Unlicensed jungle and garage broadcast from a boat off the Thames estuary."},
+  {id:8, title:"Tape Hiss Archive", genre:"Field Recording", country:"BR", bitrate:96, lat:-23.5,lon:-46.6, pop:"😐", fav:false, desc:"Rainforest and market field recordings, unedited, twelve hours a day."},
+  {id:9, title:"Grey Room", genre:"Dark Ambient", country:"FI", bitrate:128, lat:60.2,lon:24.9, pop:"🧊", fav:false, desc:"Minimalist ambient, mostly silence, occasionally interrupted."},
+];
+
+STATIONS.forEach((s,i) => { s.art = genArt(i, PALETTE[i%PALETTE.length][0], PALETTE[i%PALETTE.length][1]); s.idcode = "PLT-0" + (i+1); });
+
+// ---------- STATE ----------
+let currentStation = null;
+let isPlaying = false;
+let currentView = "list";
+let imageShape = "shape-square";
+let activeTag = null;
+
+// ---------- RENDER TAGS ----------
+const tagRow = document.getElementById('tagRow');
+GENRES.forEach(g => {
+  const chip = document.createElement('div');
+  chip.className = 'chip';
+  chip.textContent = g;
+  chip.onclick = () => {
+    activeTag = activeTag === g ? null : g;
+    document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+    if (activeTag) chip.classList.add('active');
+    renderStations();
+  };
+  tagRow.appendChild(chip);
+});
+
+// ---------- RENDER LIST/GRID ----------
+function filteredStations() {
+  return activeTag ? STATIONS.filter(s => s.genre === activeTag) : STATIONS;
+}
+
+function renderStations() {
+  const list = document.getElementById('listView');
+  const grid = document.getElementById('gridView');
+  list.innerHTML = ''; grid.innerHTML = '';
+
+  filteredStations().forEach(s => {
+    const sub = [s.country, s.genre, s.bitrate + 'kbps'].join(' - ');
+
+    const li = document.createElement('div');
+    li.className = 'plate';
+    li.onclick = () => selectStation(s);
+    li.innerHTML = `
+      <div class="idcode">${s.idcode}</div>
+      <img class="art" src="${s.art}">
+      <div class="meta">
+        <div class="title">${s.title}</div>
+        <div class="sub">${sub}</div>
+      </div>
+      <div class="fav-mark">${s.fav ? '♥' : ''}</div>
+      <div class="pop-badge">${s.pop}</div>`;
+    list.appendChild(li);
+
+    const gi = document.createElement('div');
+    gi.className = 'plate';
+    gi.onclick = () => selectStation(s);
+    gi.innerHTML = `
+      <div class="idcode">${s.idcode}</div>
+      <img class="art ${imageShape}" src="${s.art}">
+      <div class="pop-badge">${s.pop}</div>`;
+    grid.appendChild(gi);
+  });
+}
+
+// ---------- MAP ----------
+function renderMap() {
+  const map = document.getElementById('mapView');
+  map.innerHTML = '';
+  STATIONS.forEach(s => {
+    const x = ((s.lon + 180) / 360) * 100;
+    const y = ((90 - s.lat) / 180) * 100;
+    const pin = document.createElement('div');
+    pin.className = 'pin';
+    pin.style.left = x + '%';
+    pin.style.top = Math.max(10, Math.min(90, y)) + '%';
+    pin.onclick = () => selectStation(s);
+    pin.innerHTML = `<div class="drop"><img src="${s.art}"></div>`;
+    map.appendChild(pin);
+  });
+}
+
+// ---------- VIEW TOGGLES ----------
+document.getElementById('btnList').onclick = () => {
+  currentView = 'list';
+  document.getElementById('btnList').classList.add('active');
+  document.getElementById('btnGrid').classList.remove('active');
+  document.getElementById('listView').style.display = 'block';
+  document.getElementById('gridView').style.display = 'none';
+};
+document.getElementById('btnGrid').onclick = () => {
+  currentView = 'grid';
+  document.getElementById('btnGrid').classList.add('active');
+  document.getElementById('btnList').classList.remove('active');
+  document.getElementById('gridView').style.display = 'grid';
+  document.getElementById('listView').style.display = 'none';
+};
+
+// ---------- TABS ----------
+document.querySelectorAll('.nav-btn').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('.view-panel').forEach(p => p.classList.remove('active'));
+    document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'map') renderMap();
+  };
+});
+
+// ---------- THEME ----------
+document.getElementById('themeToggle').onclick = toggleDark;
+document.getElementById('darkToggle').onclick = toggleDark;
+function toggleDark() {
+  const dark = document.getElementById('device').getAttribute('data-theme') === 'dark';
+  document.getElementById('device').setAttribute('data-theme', dark ? 'light' : 'dark');
+  document.getElementById('darkToggle').classList.toggle('on', !dark);
+  document.getElementById('themeToggle').textContent = dark ? '☾' : '☀';
+}
+
+// ---------- ACCENT ----------
+document.querySelectorAll('[data-accent]').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('[data-accent]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.documentElement.style.setProperty('--rebar', btn.dataset.accent);
+  };
+});
+
+// ---------- IMAGE SHAPE ----------
+document.querySelectorAll('[data-shape]').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('[data-shape]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    imageShape = btn.dataset.shape;
+    renderStations();
+  };
+});
+
+// ---------- PLAYBACK ----------
+function selectStation(s) {
+  currentStation = s;
+  isPlaying = true;
+  document.getElementById('playerBar').classList.add('visible');
+  updateBar();
+  openSheet();
+}
+
+function updateBar() {
+  if (!currentStation) return;
+  const s = currentStation;
+  document.getElementById('barArt').style.background = `url(${s.art}) center/cover`;
+  document.getElementById('barTitle').textContent = s.title;
+  document.getElementById('barSub').textContent = [s.country, s.genre, s.bitrate + 'kbps'].join(' - ');
+  document.getElementById('barPlay').textContent = isPlaying ? '❚❚' : '▶';
+  document.getElementById('barLed').style.display = isPlaying ? 'block' : 'none';
+
+  document.getElementById('sheetArt').style.background = `url(${s.art}) center/cover`;
+  document.getElementById('sheetTitle').textContent = s.title;
+  document.getElementById('sheetDesc').textContent = s.desc;
+  document.getElementById('sheetNowPlayingText').textContent = isPlaying ? 'ON AIR — signal locked' : 'PAUSED';
+  document.getElementById('sheetPlay').textContent = isPlaying ? '❚❚' : '▶';
+  document.getElementById('sheetFav').textContent = s.fav ? '♥' : '♡';
+  document.getElementById('sheetTags').innerHTML = `<span class="chip active">${s.genre}</span> <span class="chip">${s.country}</span>`;
+  document.getElementById('sheetInfo').innerHTML = `
+    <div class="info-cell"><div class="k">Bitrate</div><div class="v">${s.bitrate} kbps</div></div>
+    <div class="info-cell"><div class="k">Country</div><div class="v">${s.country}</div></div>
+    <div class="info-cell"><div class="k">Popularity</div><div class="v">${s.pop}</div></div>
+    <div class="info-cell"><div class="k">Coordinates</div><div class="v">${s.lat.toFixed(1)}, ${s.lon.toFixed(1)}</div></div>`;
+}
+
+document.getElementById('barPlay').onclick = (e) => { e.stopPropagation(); isPlaying = !isPlaying; updateBar(); };
+document.getElementById('sheetPlay').onclick = () => { isPlaying = !isPlaying; updateBar(); };
+
+function randomStation() {
+  const pool = STATIONS.filter(s => !currentStation || s.id !== currentStation.id);
+  currentStation = pool[Math.floor(Math.random() * pool.length)];
+  isPlaying = true;
+  document.getElementById('playerBar').classList.add('visible');
+  updateBar();
+}
+document.getElementById('barShuffle').onclick = (e) => { e.stopPropagation(); randomStation(); };
+document.getElementById('sheetShuffle').onclick = randomStation;
+
+document.getElementById('sheetFav').onclick = () => {
+  if (!currentStation) return;
+  currentStation.fav = !currentStation.fav;
+  updateBar();
+  renderStations();
+};
+
+// ---------- SHEET OPEN/CLOSE ----------
+function openSheet() { document.getElementById('sheetBackdrop').classList.add('open'); }
+document.getElementById('playerBarInner').onclick = openSheet;
+document.getElementById('sheetClose').onclick = () => document.getElementById('sheetBackdrop').classList.remove('open');
+document.getElementById('sheetBackdrop').onclick = (e) => { if (e.target === e.currentTarget) e.currentTarget.classList.remove('open'); };
+
+// ---------- INIT ----------
+renderStations();
+</script>
+</body>
+</html>

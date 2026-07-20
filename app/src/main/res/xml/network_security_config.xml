@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Internet radio streams are user-pasted URLs to arbitrary shoutcast/icecast
+  servers, many of which are still plain HTTP (no TLS). Android blocks
+  cleartext traffic by default from targetSdk 28+, which silently kills
+  playback for those stations with no visible error. Allowing cleartext here
+  is a functional requirement of this app, not a security compromise —
+  stream audio isn't sensitive data.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

@@ -1,0 +1,7 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base platform theme for the window before Compose takes over setContent. -->
+    <style name="Theme.Static" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#E7E2D6</item>
+        <item name="android:windowBackground">#E7E2D6</item>
+    </style>
+</resources>
