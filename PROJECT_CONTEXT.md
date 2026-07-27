@@ -281,13 +281,21 @@ models. Saved Mixes' backup format is unrelated/unchanged.
   timer, live MM:SS countdown. The hour/minute +/- steppers now reserve a
   fixed-width number column so a 1-digit hour value and a 2-digit minute
   value don't make the two rows' button spacing look inconsistent.
-- Android Auto: the app registers as Auto-compatible
-  (`res/xml/automotive_app_desc.xml` + the manifest meta-data pointing to
-  it), so basic play/pause of whatever's already playing should surface
-  there via the standard `MediaSessionService` integration. **Full
-  browsing/picking a station from the car screen is NOT implemented** — that
-  would need converting `RadioPlaybackService` to a `MediaLibraryService`
-  with a real browse tree, scoped out as a bigger follow-up, never attempted.
+- Android Auto: `RadioPlaybackService` is now a `MediaLibraryService`
+  (was a plain `MediaSessionService`) with a real browse tree — root ->
+  flat, alphabetically-sorted list of every saved station, each a leaf
+  `MediaItem` built from `StationLookup.getAllStations()`. Manifest's
+  service intent-filter action changed accordingly to
+  `androidx.media3.session.MediaLibraryService`. Browse-tree items only
+  carry a mediaId + display metadata (no stream URI, kept lean); tapping
+  one in Android Auto round-trips it through `onAddMediaItems`, which
+  resolves the real `streamUrl` via `StationLookup.getStation(mediaId)`
+  and rebuilds a fully playable `MediaItem` — the same resolve-by-id
+  pattern backs `onGetItem` for single-item lookups. No folders (e.g.
+  Favorites-only) yet — deliberately flat per user preference, revisit if
+  the list gets unwieldy. **Not yet verified against a real car or the
+  Android Auto Desktop Head Unit** — build/install/logcat are clean, but
+  actual in-car browsing needs the user's own test.
 
 ## Features built
 - **Home**: top bar is a 3-way segmented button (List/Grid/Map) + Filter +
@@ -444,10 +452,11 @@ several more within this session alone (see "Features built").
    previous bug there (grabbed an arbitrary image instead of the matching
    one) was fixed but is easy to reintroduce if mix ID generation/export
    ever changes.
-5. Android Auto: registers as compatible and basic play/pause should work,
-   but there's no real browse tree (see "Playback details worth knowing") —
-   a `MediaLibraryService` conversion is a real, not-yet-scoped follow-up if
-   the user wants full in-car station browsing.
+5. Android Auto: `MediaLibraryService` browse tree implemented (see
+   "Playback details worth knowing") — full station-list picking from the
+   car screen, not just play/pause. Still needs real-car or DHU
+   verification (not yet done as of this update). No folders/Favorites
+   split yet, deliberately flat.
 6. `CountryTimeZones.kt`'s country→timezone map is best-effort (~45
    countries, one representative zone each) — genuinely wrong for the
    sliver of listeners in a non-representative zone of a multi-zone country

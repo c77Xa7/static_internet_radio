@@ -2,6 +2,7 @@ package com.staticradio.app.playback
 
 import android.app.PendingIntent
 import android.content.Intent
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
 import com.staticradio.app.MainActivity
@@ -24,32 +25,46 @@ import androidx.media3.exoplayer.metadata.MetadataOutput
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.extractor.metadata.icy.IcyHeaders
 import androidx.media3.extractor.metadata.icy.IcyInfo
+import androidx.media3.session.LibraryResult
+import androidx.media3.session.MediaLibraryService
+import androidx.media3.session.MediaLibraryService.LibraryParams
 import androidx.media3.session.MediaSession
-import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
+import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import com.google.common.util.concurrent.MoreExecutors
+import com.google.common.util.concurrent.SettableFuture
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.OkHttpClient
+import java.io.ByteArrayOutputStream
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
- * Foreground service hosting the ExoPlayer instance + MediaSession.
- * MediaSessionService handles the notification, lock-screen controls, and
- * Android Auto exposure automatically — you don't need to build a custom
- * notification unless you want non-standard actions beyond play/pause/next.
+ * Foreground service hosting the ExoPlayer instance + MediaLibrarySession.
+ * MediaLibraryService (a MediaSessionService subtype) handles the
+ * notification and lock-screen controls automatically, and additionally
+ * exposes a browsable tree (root -> flat station list) so Android Auto can
+ * let the user pick a station from the car screen instead of only
+ * play/pausing whatever's already loaded.
  */
-class RadioPlaybackService : MediaSessionService() {
+class RadioPlaybackService : MediaLibraryService() {
 
     private lateinit var player: ExoPlayer
-    private lateinit var mediaSession: MediaSession
+    private lateinit var mediaSession: MediaLibrarySession
     private val repository = PlaybackRepository.getInstance()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -58,6 +73,12 @@ class RadioPlaybackService : MediaSessionService() {
 
     private var sleepTimerJob: Job? = null
     private val autoGainProcessor = AutoGainAudioProcessor()
+
+    // Initialized in onCreate (needs an attached Context) — also reused to
+    // pre-resolve browse-tree artwork into embedded bytes, since Android
+    // Auto's process can't read this app's private file:// image storage
+    // directly (see buildBrowsableStub below).
+    private lateinit var bitmapLoader: CoilBitmapLoader
 
     override fun onCreate() {
         super.onCreate()
@@ -121,14 +142,15 @@ class RadioPlaybackService : MediaSessionService() {
             PendingIntent.FLAG_IMMUTABLE
         )
 
-        mediaSession = MediaSession.Builder(this, player)
+        bitmapLoader = CoilBitmapLoader(this, serviceScope)
+
+        mediaSession = MediaLibrarySession.Builder(this, player, librarySessionCallback)
             .setSessionActivity(sessionActivityIntent)
-            .setCallback(mediaSessionCallback)
-            .setBitmapLoader(CoilBitmapLoader(this, serviceScope))
+            .setBitmapLoader(bitmapLoader)
             .build()
     }
 
-    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession = mediaSession
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession = mediaSession
 
     override fun onDestroy() {
         mediaSession.run {
@@ -144,20 +166,89 @@ class RadioPlaybackService : MediaSessionService() {
         repository.updateCurrentStation(stationId)
         repository.updateError(null)
 
+        player.setMediaItem(buildPlayableMediaItem(stationId, streamUrl, title, imageUrl))
+        player.prepare()
+        player.playWhenReady = true
+    }
+
+    /**
+     * Shared by direct playback, the Android Auto browse tree, and
+     * onAddMediaItems (which fills in a real URI for a browse-tree item
+     * that only arrived with a mediaId).
+     */
+    private fun buildPlayableMediaItem(
+        stationId: String,
+        streamUrl: String,
+        title: String,
+        imageUrl: String?
+    ): MediaItem {
         val metadata = MediaMetadata.Builder()
             .setTitle(title)
             .setStation(title)
+            .setIsBrowsable(false)
+            .setIsPlayable(true)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
             .apply { imageUrl?.let { setArtworkUri(Uri.parse(it)) } }
             .build()
 
-        val mediaItem = MediaItem.Builder()
+        return MediaItem.Builder()
+            .setMediaId(stationId)
             .setUri(streamUrl)
             .setMediaMetadata(metadata)
             .build()
+    }
 
-        player.setMediaItem(mediaItem)
-        player.prepare()
-        player.playWhenReady = true
+    /**
+     * Browse-tree entries only need a mediaId + display metadata — no
+     * stream URI. Android Auto resolves the real URI by round-tripping the
+     * selected item through onAddMediaItems below when the user taps it.
+     *
+     * Artwork is embedded as raw bytes (setArtworkData), not passed as a
+     * URI — Android Auto's browse list is read by a different process
+     * (the car host app), which can't read this app's private
+     * file://.../files/... storage for user-uploaded images. Only
+     * Radio-Browser-sourced http(s) images happened to still render, since
+     * any process can fetch those directly. Resolving the bitmap ourselves
+     * (same in-process Coil loader used for notification artwork, which can
+     * read both file:// and http(s)) and embedding the bytes sidesteps that
+     * entirely, regardless of image source.
+     */
+    private suspend fun buildBrowsableStub(station: StationRef): MediaItem {
+        val title = if (station.isFavorite) "★ ${station.title}" else station.title
+        val metadata = MediaMetadata.Builder()
+            .setTitle(title)
+            .setIsBrowsable(false)
+            .setIsPlayable(true)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
+            .apply { loadArtworkBytes(station.imageUrl)?.let { setArtworkData(it, MediaMetadata.PICTURE_TYPE_FRONT_COVER) } }
+            .build()
+        return MediaItem.Builder()
+            .setMediaId(station.id)
+            .setMediaMetadata(metadata)
+            .build()
+    }
+
+    private suspend fun loadArtworkBytes(imageUrl: String?): ByteArray? {
+        if (imageUrl.isNullOrBlank()) return null
+        return try {
+            val bitmap = suspendCancellableCoroutine<Bitmap> { cont ->
+                val future = bitmapLoader.loadBitmap(Uri.parse(imageUrl))
+                future.addListener({
+                    try {
+                        cont.resume(future.get())
+                    } catch (e: Exception) {
+                        cont.resumeWithException(e)
+                    }
+                }, MoreExecutors.directExecutor())
+            }
+            ByteArrayOutputStream().use { stream ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)
+                stream.toByteArray()
+            }
+        } catch (e: Exception) {
+            Log.w("RadioPlaybackService", "Couldn't load browse-tree artwork for $imageUrl", e)
+            null
+        }
     }
 
     fun playRandomStation() {
@@ -244,7 +335,7 @@ class RadioPlaybackService : MediaSessionService() {
         }
     }
 
-    private val mediaSessionCallback = object : MediaSession.Callback {
+    private val librarySessionCallback = object : MediaLibrarySession.Callback {
 
         override fun onConnect(
             session: MediaSession,
@@ -293,6 +384,87 @@ class RadioPlaybackService : MediaSessionService() {
             }
             return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
         }
+
+        override fun onGetLibraryRoot(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            params: LibraryParams?
+        ): ListenableFuture<LibraryResult<MediaItem>> {
+            val rootMetadata = MediaMetadata.Builder()
+                .setTitle("STATIC")
+                .setIsBrowsable(true)
+                .setIsPlayable(false)
+                .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_MIXED)
+                .build()
+            val rootItem = MediaItem.Builder()
+                .setMediaId(BROWSE_ROOT_ID)
+                .setMediaMetadata(rootMetadata)
+                .build()
+            return Futures.immediateFuture(LibraryResult.ofItem(rootItem, params))
+        }
+
+        override fun onGetChildren(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            parentId: String,
+            page: Int,
+            pageSize: Int,
+            params: LibraryParams?
+        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+            if (parentId != BROWSE_ROOT_ID) {
+                return Futures.immediateFuture(LibraryResult.ofError(LibraryResult.RESULT_ERROR_BAD_VALUE))
+            }
+            val future = SettableFuture.create<LibraryResult<ImmutableList<MediaItem>>>()
+            serviceScope.launch {
+                val stations = stationLookup?.getAllStations().orEmpty()
+                val children = coroutineScope {
+                    stations.map { async { buildBrowsableStub(it) } }.awaitAll()
+                }
+                future.set(LibraryResult.ofItemList(ImmutableList.copyOf(children), params))
+            }
+            return future
+        }
+
+        override fun onGetItem(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            mediaId: String
+        ): ListenableFuture<LibraryResult<MediaItem>> {
+            val future = SettableFuture.create<LibraryResult<MediaItem>>()
+            serviceScope.launch {
+                val station = stationLookup?.getStation(mediaId)
+                if (station == null) {
+                    future.set(LibraryResult.ofError(LibraryResult.RESULT_ERROR_BAD_VALUE))
+                } else {
+                    future.set(LibraryResult.ofItem(buildBrowsableStub(station), null))
+                }
+            }
+            return future
+        }
+
+        override fun onAddMediaItems(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            mediaItems: List<MediaItem>
+        ): ListenableFuture<List<MediaItem>> {
+            val future = SettableFuture.create<List<MediaItem>>()
+            serviceScope.launch {
+                val resolved = mediaItems.mapNotNull { item ->
+                    // Items that already carry a URI (e.g. resumed from the app's own
+                    // controller) pass through unchanged; browse-tree taps only have a
+                    // mediaId and need the real stream URL looked up.
+                    if (item.localConfiguration != null) {
+                        item
+                    } else {
+                        stationLookup?.getStation(item.mediaId)?.let {
+                            buildPlayableMediaItem(it.id, it.streamUrl, it.title, it.imageUrl)
+                        }
+                    }
+                }
+                future.set(resolved)
+            }
+            return future
+        }
     }
 
     /**
@@ -302,13 +474,22 @@ class RadioPlaybackService : MediaSessionService() {
      */
     interface StationLookup {
         suspend fun getRandomStation(excludeId: String?): StationRef?
+        suspend fun getAllStations(): List<StationRef>
+        suspend fun getStation(stationId: String): StationRef?
         suspend fun updateNowPlayingCache(stationId: String, text: String)
         suspend fun updateBitrateFromStream(stationId: String, bitrate: Int)
     }
 
-    data class StationRef(val id: String, val streamUrl: String, val title: String, val imageUrl: String?)
+    data class StationRef(
+        val id: String,
+        val streamUrl: String,
+        val title: String,
+        val imageUrl: String?,
+        val isFavorite: Boolean = false
+    )
 
     companion object {
+        const val BROWSE_ROOT_ID = "static_radio_root"
         const val CMD_PLAY_STATION = "com.staticradio.app.PLAY_STATION"
         const val CMD_PLAY_RANDOM = "com.staticradio.app.PLAY_RANDOM"
         const val CMD_SET_SLEEP_TIMER = "com.staticradio.app.SET_SLEEP_TIMER"

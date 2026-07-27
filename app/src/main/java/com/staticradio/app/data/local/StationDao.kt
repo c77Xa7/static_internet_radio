@@ -48,6 +48,12 @@ interface StationDao {
     @Query("SELECT * FROM stations WHERE (:excludeId IS NULL OR id != :excludeId) ORDER BY RANDOM() LIMIT 1")
     suspend fun getRandomStation(excludeId: String?): StationEntity?
 
+    @Query("SELECT * FROM stations")
+    suspend fun getAllStationsOnce(): List<StationEntity>
+
+    @Query("SELECT * FROM stations WHERE id = :stationId")
+    suspend fun getStationOnce(stationId: String): StationEntity?
+
     @Query("SELECT COUNT(*) FROM stations")
     suspend fun getStationCount(): Int
 

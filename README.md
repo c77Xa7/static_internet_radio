@@ -22,7 +22,8 @@ bookmark SoundCloud/Mixcloud DJ mixes alongside them.
 - **Playback**: Media3/ExoPlayer with software auto-gain (internet radio
   streams carry no loudness metadata), a configurable buffer, and a
   persistent now-playing bar with live ICY metadata
-- **Sleep timer**, Android Auto basic playback support
+- **Sleep timer**, and Android Auto support — browse and pick a station
+  from the car screen, not just play/pause
 - **Full-fidelity backup/restore** for both stations and mixes (own zip
   format), plus one-way import from Transistor collection exports
 - **Post-brutalist Material You** visual style — raw concrete tones, one
@@ -30,6 +31,23 @@ bookmark SoundCloud/Mixcloud DJ mixes alongside them.
 
 See [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md) for full architecture,
 data model, and build details.
+
+## Changelog
+
+### v1.1
+- **Android Auto**: full browsable station list from the car screen
+  (previously play/pause of whatever was already loaded only) — tap
+  through STATIC's media source to pick any saved station directly
+- Favourited stations now sort to the top of the Android Auto list and
+  show a ★ prefix
+- Fixed station artwork not showing in Android Auto for manually
+  uploaded images (Radio Browser–sourced images were unaffected) — the
+  car's host process couldn't read this app's private local image
+  storage directly, so artwork is now resolved and embedded in-app
+  before being sent across
+
+### v1.0
+- First public release
 
 ## Installing
 
