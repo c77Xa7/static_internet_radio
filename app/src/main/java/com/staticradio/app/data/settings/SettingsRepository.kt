@@ -38,6 +38,7 @@ class SettingsRepository(private val context: Context) {
         val GRID_LINE_WIDTH_DP = floatPreferencesKey("grid_line_width_dp")
         val GRID_OPACITY = floatPreferencesKey("grid_opacity")
         val BUFFER_SECONDS = intPreferencesKey("buffer_seconds")
+        val CAST_ENABLED = booleanPreferencesKey("cast_enabled")
     }
 
     val themeMode: Flow<ThemeMode> = context.settingsDataStore.data.map { prefs ->
@@ -118,5 +119,15 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setBufferSeconds(value: Int) {
         context.settingsDataStore.edit { it[Keys.BUFFER_SECONDS] = value }
+    }
+
+    // Off by default and opt-in only — Play Services / the Cast SDK are never
+    // touched unless the user explicitly turns this on (see RadioPlaybackService).
+    val castEnabled: Flow<Boolean> = context.settingsDataStore.data.map { prefs ->
+        prefs[Keys.CAST_ENABLED] ?: false
+    }
+
+    suspend fun setCastEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.CAST_ENABLED] = enabled }
     }
 }

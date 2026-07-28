@@ -105,6 +105,7 @@ fun SettingsScreen(
     val gridLineWidthDp by viewModel.gridLineWidthDp.collectAsState()
     val gridOpacity by viewModel.gridOpacity.collectAsState()
     val bufferSeconds by viewModel.bufferSeconds.collectAsState()
+    val castEnabled by viewModel.castEnabled.collectAsState()
     val moodVocabulary by stationDao.observeTagsByType(com.staticradio.app.data.local.TagType.MOOD).collectAsState(initial = emptyList())
     val styleVocabulary by stationDao.observeTagsByType(com.staticradio.app.data.local.TagType.STYLE).collectAsState(initial = emptyList())
 
@@ -251,6 +252,21 @@ fun SettingsScreen(
             }
             Text(
                 "A bigger buffer holds more audio ahead of playback, trading a slightly slower start for better resilience against network drops — same idea as Transistor's buffer setting. Takes effect next time a station starts playing.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        // ---- Cast ----
+        SettingsCategory(title = "Cast") {
+            SettingsRow(label = "Chromecast") {
+                Switch(
+                    checked = castEnabled,
+                    onCheckedChange = viewModel::setCastEnabled
+                )
+            }
+            Text(
+                "Adds a cast button to the player bar for streaming to a Chromecast device on your network. Off by default — enabling this is the only thing in the app that touches Google Play Services.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

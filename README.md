@@ -22,8 +22,8 @@ bookmark SoundCloud/Mixcloud DJ mixes alongside them.
 - **Playback**: Media3/ExoPlayer with software auto-gain (internet radio
   streams carry no loudness metadata), a configurable buffer, and a
   persistent now-playing bar with live ICY metadata
-- **Sleep timer**, and Android Auto support — browse and pick a station
-  from the car screen, not just play/pause
+- **Sleep timer**, Android Auto support (browse and pick a station from
+  the car screen), and opt-in **Chromecast** support
 - **Full-fidelity backup/restore** for both stations and mixes (own zip
   format), plus one-way import from Transistor collection exports
 - **Post-brutalist Material You** visual style — raw concrete tones, one
@@ -33,6 +33,15 @@ See [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md) for full architecture,
 data model, and build details.
 
 ## Changelog
+
+### v1.2
+- **Chromecast support**, off by default (Settings → Cast) — cast any
+  station to a Chromecast or Cast-compatible speaker, with automatic
+  fallback to local playback if the cast session drops
+- Note: casting a live radio stream currently has a noticeable (~15s)
+  delay before playback fully settles — this looks like an inherent
+  limitation of casting raw, containerless radio streams to Cast
+  receivers, not something fixable client-side
 
 ### v1.1
 - **Android Auto**: full browsable station list from the car screen

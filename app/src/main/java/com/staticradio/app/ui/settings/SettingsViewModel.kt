@@ -56,6 +56,8 @@ class SettingsViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.staticradio.app.data.settings.DEFAULT_GRID_OPACITY)
     val bufferSeconds: StateFlow<Int> = settingsRepository.bufferSeconds
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.staticradio.app.data.settings.DEFAULT_BUFFER_SECONDS)
+    val castEnabled: StateFlow<Boolean> = settingsRepository.castEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     val genreVocabulary: StateFlow<List<TagEntity>> = stationDao.observeTagsByType(TagType.GENRE)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -76,6 +78,7 @@ class SettingsViewModel(
     fun setGridOpacity(value: Float) = viewModelScope.launch { settingsRepository.setGridOpacity(value) }
     fun resetGridDefaults() = viewModelScope.launch { settingsRepository.resetGridDefaults() }
     fun setBufferSeconds(value: Int) = viewModelScope.launch { settingsRepository.setBufferSeconds(value) }
+    fun setCastEnabled(enabled: Boolean) = viewModelScope.launch { settingsRepository.setCastEnabled(enabled) }
 
     fun setNewTagName(value: String) { _newTagName.value = value }
 

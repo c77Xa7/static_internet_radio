@@ -2,9 +2,9 @@
 
 Source of truth for this project. Read this before writing code — it reflects
 the ACTUAL current state of the app (not the original plan), updated as of
-2026-07-20 after a long multi-round session of UI/feature amendments. The app
-builds, installs, and runs. Both a debug build and a signed release build are
-verified working as of this update.
+2026-07-28 after adding the Android Auto browse tree and working Chromecast
+support. The app builds, installs, and runs. Both a debug build and a signed
+release build are verified working as of this update.
 
 ## Concept
 Side-loadable Android internet radio app, user-curated stations only (manual
@@ -12,8 +12,9 @@ URL entry, Radio Browser name search, or Radio Browser genre-tag search),
 plus a bookmarking feature for SoundCloud/Mixcloud DJ mixes. Solo dev,
 weekend-project pace. Priority: snappy/responsive — explicit differentiator
 from Transistor, which the user finds laggy. Local-only, no backend/account/
-cloud sync (Chromecast was prototyped and then fully removed — see "Rejected
-directions" below; the app does not touch Google Play Services at all).
+cloud sync — the one exception is opt-in Chromecast support (off by
+default; see "Architecture decisions"), which is the only thing that
+touches Google Play Services, and only once the user turns it on.
 
 ## Build environment (read this first if you're picking this up cold)
 - **No Android SDK/Gradle/JDK on PATH in the agent shell.** Use Android
@@ -122,15 +123,68 @@ directions" below; the app does not touch Google Play Services at all).
   - HLS support needs the separate `media3-exoplayer-hls` dependency
   - `android:networkSecurityConfig` allows cleartext (`http://`) traffic —
     plenty of legacy radio streams are still HTTP-only
-- **Chromecast was added and then fully removed** in this session (see
-  "Rejected directions"). If you ever revisit it: the working approach was
-  `androidx.media3:media3-cast`'s `CastPlayer` swapped in/out of the
-  `MediaSession` via `mediaSession.setPlayer(...)`, gated behind a Settings
-  toggle so Play Services is never touched unless the user opts in. It was
-  removed because `MediaRouteButton` crashed (`IllegalArgumentException:
-  background can not be translucent`) when measured inside a transparent
-  Compose `AndroidView` — fixable (give it an explicit opaque background) —
-  but the user asked to drop the feature entirely rather than debug further.
+- **Chromecast**: was added, fully removed, then re-added and made to work
+  properly in a later session (see "Rejected directions" for the history —
+  it's no longer rejected). `androidx.media3:media3-cast`'s `CastPlayer` is
+  swapped in/out of `RadioPlaybackService`'s `MediaLibrarySession` via
+  `mediaSession.player = ...` (`switchToCast`/`switchToLocal`), gated behind
+  Settings → Cast → "Chromecast" (off by default, `SettingsRepository.
+  castEnabled`) so Play Services is never touched unless the user opts in.
+  `playStation`/`togglePlayPause` target `mediaSession.player` generically
+  (not a hardcoded local-player reference) so picking a station or
+  play/pause from the app redirects an already-active cast correctly, and
+  a dropped cast session falls back to local playback automatically
+  (`SessionManagerListener.onSessionEnded/onSessionSuspended ->
+  switchToLocal`). Several real, non-obvious fixes were needed to get here
+  — see `ui/common/CastButton.kt`, `cast/CastOptionsProvider.kt`, and
+  `playback/LiveStreamMediaItemConverter.kt` for the full reasoning, but in
+  summary:
+  - `MainActivity` had to become a `FragmentActivity` (was a plain
+    `ComponentActivity`) — `MediaRouteButton`'s built-in device-picker
+    dialog requires a `FragmentManager` and crashes without one.
+  - `MediaRouteButton`'s constructor and the dialog it opens both read the
+    **AppCompat** `colorPrimary` theme attribute (not a platform
+    `android:` attribute) to pick the cast icon's tint, and crash
+    (`IllegalArgumentException: background can not be translucent`) if
+    it's undefined — which it always is on a theme with no AppCompat
+    lineage. `Theme.Static` (`res/values/themes.xml`) now parents from
+    `Theme.AppCompat.Light.NoActionBar` with `colorPrimary`/`colorAccent`
+    explicitly set, and `CastButton.kt`'s own `AndroidView` additionally
+    wraps its Context in a `ContextThemeWrapper` for the button specifically
+    (two separate code paths needed the same fix).
+  - `CastPlayer`'s `DefaultMediaItemConverter` throws (`The item must
+    specify its mimeType`) unless the `MediaItem` has an explicit
+    `mimeType` — local ExoPlayer doesn't need one (auto-detects via
+    extractors), so `buildPlayableMediaItem()` deliberately doesn't set
+    one; a `MediaItem.withCastMimeType()` extension applies `audio/mpeg`
+    (a guess — stations don't carry known codec info) only when the
+    active player is a `CastPlayer`, in both `switchToCast` and
+    `playStation`.
+  - `DefaultMediaItemConverter` also hardcodes `MediaInfo.
+    STREAM_TYPE_BUFFERED` (on-demand, with the receiver assuming a known
+    duration) for every item, with no way to override it via `MediaItem`.
+    `LiveStreamMediaItemConverter` delegates to `DefaultMediaItemConverter`
+    for everything (metadata, mimeType, the custom-data JSON payload
+    `CastPlayer` needs to deserialize items back) and only rebuilds the
+    `MediaInfo` with `STREAM_TYPE_LIVE`, since every station is a
+    continuous live stream. Passed into `CastPlayer(ctx, ...)`'s
+    two-arg constructor.
+  - The Cast SDK spins up its **own** separate MediaSession + notification
+    by default the moment a session starts, on top of the app's own —
+    `CastOptionsProvider` sets `CastMediaOptions.Builder().
+    setMediaSessionEnabled(false)` to suppress it; without this it showed
+    as duplicate near-identical "now playing" notification cards.
+  - **Known, accepted limitation**: casting a raw Icecast/Shoutcast MP3
+    stream (no container/manifest, ICY metadata interleaved in the audio
+    bytes) has a consistent ~15–16s stall shortly after playback starts,
+    reproduced identically across two different Cast receiver brands —
+    playback is correct, just slow to truly start/settle. This looks
+    inherent to how Cast receivers (built around manifest-based formats
+    like HLS/DASH) handle raw progressive-MP3 live streams, not something
+    fixable client-side without server-side transcoding into a
+    Cast-friendly format — out of scope. `STREAM_TYPE_LIVE` (above) didn't
+    change this measurably; it's still correct to set, just wasn't the
+    dominant cause.
 - `PlaybackRepository` is the StateFlow bridge between service and UI
   (currentStationId, isPlaying, isBuffering, nowPlayingText, playbackError —
   surfaced in the player bar instead of silently swallowed,
@@ -141,8 +195,8 @@ directions" below; the app does not touch Google Play Services at all).
   Room, these are singleton app state, not per-station data. Current keys:
   theme mode, accent color, grid image shape, normalizeVolume,
   showBackgroundGrid + gridSpacingDp/gridLineWidthDp/gridOpacity (with a
-  reset-to-default), bufferSeconds. (A `castEnabled` key existed briefly for
-  Chromecast and was removed along with the feature.)
+  reset-to-default), bufferSeconds, castEnabled (Chromecast toggle, off by
+  default — see Chromecast above).
 - No DI framework — manual `by lazy` singletons in `StaticRadioApp`
   (Application class).
 - **Navigation** (`ui/nav/StaticApp.kt`): no bottom nav bar. A single shared
@@ -420,12 +474,6 @@ doc win. There have been many deliberate departures since the mockup, and
 several more within this session alone (see "Features built").
 
 ## Rejected directions (tried, then explicitly undone — don't reintroduce without asking)
-- **Chromecast**: fully implemented (Cast SDK, `CastPlayer` swap, Settings
-  toggle, `MediaRouteButton` in the player bar) then fully removed after a
-  crash (`MediaRouteButton` measured against a transparent background) — the
-  user chose to drop the feature rather than have it fixed. No Cast/
-  Play-Services/MediaRouter dependencies remain in `build.gradle.kts` or
-  `libs.versions.toml`.
 - **Genre sourced from Radio Browser / ICY `icy-genre`**: removed:
   Radio Browser tag imports and ICY genre updates were "always very messy"
   per the user. Genre is user-defined-only now (see Data model).

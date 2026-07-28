@@ -1,7 +1,36 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base platform theme for the window before Compose takes over setContent. -->
-    <style name="Theme.Static" parent="android:Theme.Material.Light.NoActionBar">
+    <!-- Base platform theme for the window before Compose takes over setContent.
+         Parented from Theme.AppCompat (not a plain platform theme) because
+         androidx.mediarouter's device-picker dialog builds itself directly
+         from the Activity's real theme (not through any Compose wrapper) and
+         reads the AppCompat-specific colorPrimary attribute — undefined,
+         and so fully transparent, on a non-AppCompat theme, which crashes
+         MediaRouterThemeHelper's contrast calculation. See CastButton.kt for
+         the matching fix on the button itself (a separate code path). -->
+    <style name="Theme.Static" parent="Theme.AppCompat.Light.NoActionBar">
         <item name="android:statusBarColor">#E7E2D6</item>
         <item name="android:windowBackground">#E7E2D6</item>
+        <item name="colorPrimary">#FF4713</item>
+        <item name="colorAccent">#FF4713</item>
+    </style>
+
+    <!-- Wraps the Context passed to MediaRouteButton's constructor (see
+         ui/common/CastButton.kt). MediaRouterThemeHelper.getControllerColor
+         reads the *AppCompat* androidx.appcompat.R.attr.colorPrimary theme
+         attribute (not a platform android: attribute) to pick the cast
+         icon's light/dark tint, and crashes (IllegalArgumentException:
+         background can not be translucent) if it resolves to fully
+         transparent — which it does against this app's plain platform
+         Theme.Static, since that has no AppCompat lineage and so never
+         defines colorPrimary at all. Parenting from an actual AppCompat
+         theme (pulled in transitively by mediarouter itself) and setting
+         colorPrimary/colorAccent/android:colorBackground explicitly fixes
+         it; the button's real *visible* background is still set at
+         runtime in CastButton.kt to match wherever it's placed — these
+         values only affect the internal tint decision. -->
+    <style name="Theme.Static.MediaRouteButtonFix" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="colorPrimary">#FF4713</item>
+        <item name="colorAccent">#FF4713</item>
+        <item name="android:colorBackground">#17171A</item>
     </style>
 </resources>

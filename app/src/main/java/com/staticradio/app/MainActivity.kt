@@ -5,8 +5,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
@@ -24,7 +24,13 @@ import com.staticradio.app.ui.nav.StaticApp
 import com.staticradio.app.ui.theme.StaticTheme
 import com.staticradio.app.ui.theme.resolveDarkTheme
 
-class MainActivity : ComponentActivity() {
+// FragmentActivity, not plain ComponentActivity — MediaRouteButton's built-in
+// device-picker dialog (androidx.mediarouter.app) requires a FragmentManager
+// to show its DialogFragment, and crashes with "The activity must be a
+// subclass of FragmentActivity" otherwise. FragmentActivity is itself a
+// ComponentActivity subclass, so this is a drop-in swap — setContent,
+// registerForActivityResult etc. all still work unchanged.
+class MainActivity : FragmentActivity() {
 
     private val requestNotificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* no-op either way — playback works without it, just no visible notification */ }

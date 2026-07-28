@@ -11,6 +11,7 @@ import com.staticradio.app.data.StationLookupImpl
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Metadata
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import android.util.Log
 import androidx.media3.common.Player
@@ -21,11 +22,15 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
+import androidx.media3.cast.CastPlayer
 import androidx.media3.exoplayer.metadata.MetadataOutput
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.extractor.metadata.icy.IcyHeaders
 import androidx.media3.extractor.metadata.icy.IcyInfo
 import androidx.media3.session.LibraryResult
+import com.google.android.gms.cast.framework.CastContext
+import com.google.android.gms.cast.framework.CastSession
+import com.google.android.gms.cast.framework.SessionManagerListener
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaLibraryService.LibraryParams
 import androidx.media3.session.MediaSession
@@ -48,6 +53,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import java.io.ByteArrayOutputStream
 import kotlin.coroutines.resume
@@ -79,6 +85,13 @@ class RadioPlaybackService : MediaLibraryService() {
     // Auto's process can't read this app's private file:// image storage
     // directly (see buildBrowsableStub below).
     private lateinit var bitmapLoader: CoilBitmapLoader
+
+    // Cast is entirely opt-in (see SettingsRepository.castEnabled) — none of
+    // this touches Google Play Services until the user turns it on. See
+    // enableCastSupport/disableCastSupport and the switchToCast/switchToLocal
+    // pair that actually swaps the session's active Player.
+    private var castContext: CastContext? = null
+    private var castPlayer: CastPlayer? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -134,6 +147,12 @@ class RadioPlaybackService : MediaLibraryService() {
             }
         }
 
+        serviceScope.launch {
+            app.settingsRepository.castEnabled.collect { enabled ->
+                if (enabled) enableCastSupport() else disableCastSupport()
+            }
+        }
+
         // Custom launch intent so tapping the notification opens your app,
         // not a default system screen.
         val sessionActivityIntent = PendingIntent.getActivity(
@@ -153,11 +172,92 @@ class RadioPlaybackService : MediaLibraryService() {
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession = mediaSession
 
     override fun onDestroy() {
+        disableCastSupport()
         mediaSession.run {
             player.release()
             release()
         }
         super.onDestroy()
+    }
+
+    // ---- Cast: opt-in swap between the local ExoPlayer and a CastPlayer ----
+
+    private fun enableCastSupport() {
+        if (castContext != null) return
+        // The deprecated synchronous CastContext.getSharedInstance(Context) can
+        // return before Play Services has actually finished setting it up —
+        // touching .sessionManager immediately after threw silently inside a
+        // coroutine with no CoroutineExceptionHandler, so cast support never
+        // activated despite no crash and no visible error. The Task-based
+        // overload only completes once CastContext is genuinely ready.
+        CastContext.getSharedInstance(this, MoreExecutors.directExecutor())
+            .addOnSuccessListener { ctx ->
+                if (castContext != null) return@addOnSuccessListener
+                try {
+                    castContext = ctx
+                    ctx.sessionManager.addSessionManagerListener(sessionManagerListener, CastSession::class.java)
+                    if (ctx.sessionManager.currentCastSession?.isConnected == true) switchToCast()
+                } catch (e: Exception) {
+                    Log.w("RadioPlaybackService", "Failed to register cast session listener", e)
+                }
+            }
+            .addOnFailureListener { e -> Log.w("RadioPlaybackService", "Cast unavailable", e) }
+    }
+
+    private fun disableCastSupport() {
+        castContext?.sessionManager?.removeSessionManagerListener(sessionManagerListener, CastSession::class.java)
+        switchToLocal()
+        castContext = null
+    }
+
+    // Block bodies deliberately, not `= expr` / `= Unit` — the single-expression
+    // form on these particular overrides (implementing a generic Java interface
+    // with void methods) tripped a KSP compiler bug ("unexpected jvm signature V").
+    private val sessionManagerListener = object : SessionManagerListener<CastSession> {
+        override fun onSessionStarted(session: CastSession, sessionId: String) { switchToCast() }
+        override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) { switchToCast() }
+        override fun onSessionEnded(session: CastSession, error: Int) {
+            if (error != 0) Log.w("RadioPlaybackService", "Cast session ended with error $error")
+            switchToLocal()
+        }
+        override fun onSessionSuspended(session: CastSession, reason: Int) { switchToLocal() }
+        override fun onSessionStarting(session: CastSession) {}
+        override fun onSessionStartFailed(session: CastSession, error: Int) {
+            Log.w("RadioPlaybackService", "Cast session failed to start, error $error")
+        }
+        override fun onSessionEnding(session: CastSession) {}
+        override fun onSessionResuming(session: CastSession, sessionId: String) {}
+        override fun onSessionResumeFailed(session: CastSession, error: Int) {
+            Log.w("RadioPlaybackService", "Cast session failed to resume, error $error")
+        }
+    }
+
+    private fun switchToCast() {
+        val ctx = castContext ?: return
+        if (mediaSession.player is CastPlayer) return
+        player.pause() // keep the local ExoPlayer instance alive (paused) so switching back doesn't need to rebuild it
+        val cp = castPlayer ?: CastPlayer(ctx, LiveStreamMediaItemConverter()).apply { addListener(playerListener) }.also { castPlayer = it }
+        player.currentMediaItem?.let {
+            cp.setMediaItem(it.withCastMimeType())
+            cp.prepare()
+            cp.playWhenReady = true
+        }
+        mediaSession.player = cp
+    }
+
+    private fun switchToLocal() {
+        if (mediaSession.player === player) return
+        castPlayer?.let { cp ->
+            cp.currentMediaItem?.let { item ->
+                player.setMediaItem(item)
+                player.prepare()
+                player.playWhenReady = cp.playWhenReady
+            }
+            cp.removeListener(playerListener)
+            cp.release()
+        }
+        castPlayer = null
+        mediaSession.player = player
     }
 
     // ---- Playback control API, called from your UI/ViewModel via a controller ----
@@ -166,10 +266,26 @@ class RadioPlaybackService : MediaLibraryService() {
         repository.updateCurrentStation(stationId)
         repository.updateError(null)
 
-        player.setMediaItem(buildPlayableMediaItem(stationId, streamUrl, title, imageUrl))
-        player.prepare()
-        player.playWhenReady = true
+        // Targets whichever player is currently attached to the session (local
+        // ExoPlayer, or the CastPlayer if a Chromecast session is active) so
+        // picking a new station from the app also redirects an active cast.
+        val target = mediaSession.player
+        val item = buildPlayableMediaItem(stationId, streamUrl, title, imageUrl)
+        target.setMediaItem(if (target is CastPlayer) item.withCastMimeType() else item)
+        target.prepare()
+        target.playWhenReady = true
     }
+
+    // CastPlayer's DefaultMediaItemConverter requires an explicit mimeType to
+    // build its Cast queue item (throws otherwise) — local ExoPlayer doesn't
+    // need one, it auto-detects via extractors, so buildPlayableMediaItem()
+    // itself deliberately doesn't set one. Applied wherever an item might be
+    // handed to a CastPlayer: here and in switchToCast(). Stations don't
+    // carry known codec info, so this is a best-effort default rather than
+    // something determined per-station; audio/mpeg covers the large majority
+    // of icecast/shoutcast streams.
+    private fun MediaItem.withCastMimeType(): MediaItem =
+        buildUpon().setMimeType(MimeTypes.AUDIO_MPEG).build()
 
     /**
      * Shared by direct playback, the Android Auto browse tree, and
@@ -260,7 +376,8 @@ class RadioPlaybackService : MediaLibraryService() {
     }
 
     fun togglePlayPause() {
-        if (player.isPlaying) player.pause() else player.play()
+        val target = mediaSession.player
+        if (target.isPlaying) target.pause() else target.play()
     }
 
     fun startSleepTimer(durationMillis: Long) {

@@ -21,6 +21,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.staticradio.app.playback.PlaybackRepository
 import com.staticradio.app.playback.RadioController
+import com.staticradio.app.ui.common.CastButton
 import com.staticradio.app.ui.common.LiveLed
 import com.staticradio.app.ui.home.StationArt
 import kotlinx.coroutines.flow.combine
@@ -121,6 +122,7 @@ fun PersistentPlayerBar(
     state: PlayerViewModel.PlayerBarState,
     onTogglePlayPause: () -> Unit,
     onRandom: () -> Unit,
+    castEnabled: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     if (!state.isVisible || state.station == null) return
@@ -214,6 +216,11 @@ fun PersistentPlayerBar(
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
+                if (castEnabled) {
+                    CastButton(backgroundColor = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.width((-6).dp))
+                }
+
                 IconButton(onClick = onRandom, modifier = Modifier.size(44.dp)) {
                     Icon(Icons.Filled.Shuffle, contentDescription = "Random station", tint = onAccent)
                 }

@@ -112,6 +112,7 @@ fun StaticApp(stationDao: StationDao, sharedMixUrl: String? = null) {
     val gridSpacingDp by app.settingsRepository.gridSpacingDp.collectAsState(initial = com.staticradio.app.data.settings.DEFAULT_GRID_SPACING_DP)
     val gridLineWidthDp by app.settingsRepository.gridLineWidthDp.collectAsState(initial = com.staticradio.app.data.settings.DEFAULT_GRID_LINE_WIDTH_DP)
     val gridOpacity by app.settingsRepository.gridOpacity.collectAsState(initial = com.staticradio.app.data.settings.DEFAULT_GRID_OPACITY)
+    val castEnabled by app.settingsRepository.castEnabled.collectAsState(initial = false)
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background
@@ -306,6 +307,7 @@ fun StaticApp(stationDao: StationDao, sharedMixUrl: String? = null) {
                 state = barState,
                 onTogglePlayPause = playerViewModel::togglePlayPause,
                 onRandom = playerViewModel::playRandom,
+                castEnabled = castEnabled,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(horizontal = 12.dp, vertical = 10.dp)

@@ -23,8 +23,8 @@ android {
         applicationId = "com.staticradio.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.1"
+        versionCode = 4
+        versionName = "1.2"
     }
 
     signingConfigs {
@@ -88,6 +88,9 @@ dependencies {
     implementation(libs.media3.session)
     implementation(libs.media3.common)
     implementation(libs.media3.datasource.okhttp)
+    implementation(libs.media3.cast)
+    implementation(libs.play.services.cast.framework)
+    implementation(libs.androidx.mediarouter)
 
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
