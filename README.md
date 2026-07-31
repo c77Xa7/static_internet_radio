@@ -34,6 +34,20 @@ data model, and build details.
 
 ## Changelog
 
+### v1.3
+- **Android Auto**: added a Random Station entry to the browse list, and
+  Previous/Next/Shuffle transport buttons on the now-playing screen (also
+  now show in the phone's own notification/lock screen)
+- Station artwork (including manually uploaded/URL images, not just
+  Radio Browser ones) now shows correctly in Android Auto's dual-app
+  "now playing" card
+- Fixed a rare but real bug where playback could go silent (needing a
+  manual mute/unmute to recover) right as Android Auto connects — an
+  ExoPlayer audio-focus-regain race during the car's audio device
+  attaching
+- Playback now actually stops when disconnecting from Android Auto
+  (wired or wireless), instead of continuing through the phone speaker
+
 ### v1.2
 - **Chromecast support**, off by default (Settings → Cast) — cast any
   station to a Chromecast or Cast-compatible speaker, with automatic

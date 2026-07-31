@@ -3,9 +3,14 @@ package com.staticradio.app.playback
 import android.app.PendingIntent
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
 import com.staticradio.app.MainActivity
+import com.staticradio.app.R
 import com.staticradio.app.StaticRadioApp
 import com.staticradio.app.data.StationLookupImpl
 import androidx.media3.common.MediaItem
@@ -27,6 +32,7 @@ import androidx.media3.exoplayer.metadata.MetadataOutput
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.extractor.metadata.icy.IcyHeaders
 import androidx.media3.extractor.metadata.icy.IcyInfo
+import androidx.media3.session.CommandButton
 import androidx.media3.session.LibraryResult
 import com.google.android.gms.cast.framework.CastContext
 import com.google.android.gms.cast.framework.CastSession
@@ -93,6 +99,39 @@ class RadioPlaybackService : MediaLibraryService() {
     private var castContext: CastContext? = null
     private var castPlayer: CastPlayer? = null
 
+    // Updated whenever we explicitly ask the player to start (playStation,
+    // switchToCast, togglePlayPause-to-play) — bounds the suppression
+    // watchdog (see onPlaybackSuppressionReasonChanged) to shortly after a
+    // real play request, so it can never fire long after, e.g. once you've
+    // since turned the car off and disconnected. suppressionRecoveryAttempted
+    // makes the watchdog's retry one-shot per play request — without it,
+    // the retry's own play() call re-triggers the same suppression
+    // callback, re-arming another retry, looping every ~1-2s (confirmed via
+    // dumpsys audio: rapid AudioTrack create/pause/release cycling) for the
+    // whole recovery window when the suppression is actually legitimate
+    // (e.g. no audio route at all after disconnecting).
+    private var lastPlayRequestedAtMillis = 0L
+    private var suppressionRecoveryAttempted = false
+
+    // Direct OS-level signal for "an external audio output disappeared" —
+    // more fundamental than either MediaSession controller disconnect
+    // (Android Auto's own connect/disconnect protocol quirks) or
+    // setHandleAudioBecomingNoisy (apparently doesn't fire for this device's
+    // wired Android Auto disconnect); neither of those two reliably stopped
+    // playback on USB-C disconnect. This watches actual audio hardware
+    // routing state instead, which nothing else in the pipeline depends on.
+    private val audioDeviceCallback = object : AudioDeviceCallback() {
+        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
+            val externalDeviceRemoved = removedDevices.any {
+                it.isSink && it.type != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER && it.type != AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+            }
+            if (externalDeviceRemoved) {
+                Log.d("RadioPlaybackServiceAudio", "External audio output removed, pausing")
+                mediaSession.player.pause()
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
 
@@ -138,6 +177,14 @@ class RadioPlaybackService : MediaLibraryService() {
             .setMediaSourceFactory(mediaSourceFactory)
             .setRenderersFactory(renderersFactory)
             .setLoadControl(loadControl)
+            // Pauses automatically when the current audio output disappears
+            // (ACTION_AUDIO_BECOMING_NOISY) — covers headphone unplug and,
+            // relevantly, disconnecting from Android Auto (wired or
+            // Bluetooth), which otherwise leaves audio playing through the
+            // phone speaker. Standard Android/Media3 mechanism, tied to
+            // actual audio-routing state rather than guessing at Android
+            // Auto's own session-connect/disconnect protocol.
+            .setHandleAudioBecomingNoisy(true)
             .build()
             .apply { addListener(playerListener) }
 
@@ -163,15 +210,53 @@ class RadioPlaybackService : MediaLibraryService() {
 
         bitmapLoader = CoilBitmapLoader(this, serviceScope)
 
-        mediaSession = MediaLibrarySession.Builder(this, player, librarySessionCallback)
+        mediaSession = MediaLibrarySession.Builder(
+            this,
+            StationSkippingPlayer(player, ::playPreviousStation, ::playNextStation),
+            librarySessionCallback
+        )
             .setSessionActivity(sessionActivityIntent)
             .setBitmapLoader(bitmapLoader)
             .build()
+
+        // Set session-wide (not per-controller via ConnectionResult) — a
+        // per-controller custom layout scoped to just Android Auto's package
+        // didn't reliably reach its actual now-playing UI, likely because
+        // Auto connects through the legacy MediaBrowserServiceCompat bridge
+        // (needed for car-launcher discovery — see the manifest's
+        // android.media.browse.MediaBrowserService action) rather than a
+        // native Media3 controller, and per-connection custom layouts don't
+        // thread through that legacy conversion path the same way. Setting
+        // it on the session itself is what legacy PlaybackStateCompat custom
+        // actions are actually built from. Also shows up in the phone's own
+        // notification/lock screen as a side effect — not just an Android
+        // Auto feature.
+        mediaSession.setCustomLayout(transportCustomLayout)
+
+        // Registered last, after mediaSession exists — audioDeviceCallback
+        // touches mediaSession.player, and device-change events could
+        // otherwise theoretically arrive before it's initialized.
+        (getSystemService(AUDIO_SERVICE) as AudioManager)
+            .registerAudioDeviceCallback(audioDeviceCallback, null)
+    }
+
+    // Only shuffle — previous/next are native seekToPrevious/seekToNext
+    // commands now (see StationSkippingPlayer), not custom buttons, since
+    // reusing custom actions for something that visually claims a native
+    // transport slot was what made Android Auto's button positions unstable.
+    private val transportCustomLayout: List<CommandButton> by lazy {
+        listOf(
+            CommandButton.Builder(CommandButton.ICON_SHUFFLE_ON)
+                .setSessionCommand(SessionCommand(CMD_PLAY_RANDOM, Bundle.EMPTY))
+                .setDisplayName("Random station")
+                .build()
+        )
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession = mediaSession
 
     override fun onDestroy() {
+        (getSystemService(AUDIO_SERVICE) as AudioManager).unregisterAudioDeviceCallback(audioDeviceCallback)
         disableCastSupport()
         mediaSession.run {
             player.release()
@@ -234,19 +319,20 @@ class RadioPlaybackService : MediaLibraryService() {
 
     private fun switchToCast() {
         val ctx = castContext ?: return
-        if (mediaSession.player is CastPlayer) return
+        if (castPlayer != null) return
         player.pause() // keep the local ExoPlayer instance alive (paused) so switching back doesn't need to rebuild it
-        val cp = castPlayer ?: CastPlayer(ctx, LiveStreamMediaItemConverter()).apply { addListener(playerListener) }.also { castPlayer = it }
+        val cp = CastPlayer(ctx, LiveStreamMediaItemConverter()).apply { addListener(playerListener) }.also { castPlayer = it }
         player.currentMediaItem?.let {
             cp.setMediaItem(it.withCastMimeType())
             cp.prepare()
             cp.playWhenReady = true
+            markPlayRequested()
         }
-        mediaSession.player = cp
+        mediaSession.player = StationSkippingPlayer(cp, ::playPreviousStation, ::playNextStation)
     }
 
     private fun switchToLocal() {
-        if (mediaSession.player === player) return
+        if (castPlayer == null) return
         castPlayer?.let { cp ->
             cp.currentMediaItem?.let { item ->
                 player.setMediaItem(item)
@@ -257,7 +343,7 @@ class RadioPlaybackService : MediaLibraryService() {
             cp.release()
         }
         castPlayer = null
-        mediaSession.player = player
+        mediaSession.player = StationSkippingPlayer(player, ::playPreviousStation, ::playNextStation)
     }
 
     // ---- Playback control API, called from your UI/ViewModel via a controller ----
@@ -266,14 +352,32 @@ class RadioPlaybackService : MediaLibraryService() {
         repository.updateCurrentStation(stationId)
         repository.updateError(null)
 
-        // Targets whichever player is currently attached to the session (local
-        // ExoPlayer, or the CastPlayer if a Chromecast session is active) so
-        // picking a new station from the app also redirects an active cast.
-        val target = mediaSession.player
-        val item = buildPlayableMediaItem(stationId, streamUrl, title, imageUrl)
-        target.setMediaItem(if (target is CastPlayer) item.withCastMimeType() else item)
-        target.prepare()
-        target.playWhenReady = true
+        // Artwork bytes are resolved *before* the item is ever handed to the
+        // player, not patched in afterwards — an earlier attempt embedded
+        // artwork asynchronously post-play (via replaceMediaItem once
+        // resolved), but Android Auto's compact "now playing" card (shown
+        // alongside another app like Maps) apparently reads metadata once at
+        // play-start and doesn't pick up a later update, so a late patch was
+        // invisible to it. Resolving first is the only way that surface
+        // reliably sees an image, and Coil's cache keeps this fast in
+        // practice (the station's image was almost always already loaded
+        // once, e.g. in a list/grid card, before it's played).
+        serviceScope.launch {
+            val artworkBytes = loadArtworkBytes(imageUrl)
+            // Targets whichever player is currently attached to the session
+            // (local ExoPlayer, or the CastPlayer if a Chromecast session is
+            // active) so picking a new station from the app also redirects
+            // an active cast.
+            val target = mediaSession.player
+            val item = buildPlayableMediaItem(stationId, streamUrl, title, imageUrl, artworkBytes)
+            // mediaSession.player is always wrapped in StationSkippingPlayer now,
+            // so it's never literally `is CastPlayer` — castPlayer's nullness is
+            // the actual signal for "currently routing to cast".
+            target.setMediaItem(if (castPlayer != null) item.withCastMimeType() else item)
+            target.prepare()
+            target.playWhenReady = true
+            markPlayRequested()
+        }
     }
 
     // CastPlayer's DefaultMediaItemConverter requires an explicit mimeType to
@@ -296,7 +400,8 @@ class RadioPlaybackService : MediaLibraryService() {
         stationId: String,
         streamUrl: String,
         title: String,
-        imageUrl: String?
+        imageUrl: String?,
+        artworkBytes: ByteArray? = null
     ): MediaItem {
         val metadata = MediaMetadata.Builder()
             .setTitle(title)
@@ -304,7 +409,12 @@ class RadioPlaybackService : MediaLibraryService() {
             .setIsBrowsable(false)
             .setIsPlayable(true)
             .setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
-            .apply { imageUrl?.let { setArtworkUri(Uri.parse(it)) } }
+            .apply {
+                when {
+                    artworkBytes != null -> setArtworkData(artworkBytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+                    imageUrl != null -> setArtworkUri(Uri.parse(imageUrl)) // fallback if resolving bytes failed
+                }
+            }
             .build()
 
         return MediaItem.Builder()
@@ -344,6 +454,40 @@ class RadioPlaybackService : MediaLibraryService() {
             .build()
     }
 
+    /**
+     * A synthetic browse-tree entry (not a real station) resolved specially
+     * in onAddMediaItems below — picks a fresh random station at the moment
+     * it's tapped, matching the app's own "Random station" shuffle button.
+     */
+    private fun buildRandomStationStub(): MediaItem {
+        val metadata = MediaMetadata.Builder()
+            .setTitle("Random Station")
+            .setIsBrowsable(false)
+            .setIsPlayable(true)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
+            .apply { randomStationArtwork?.let { setArtworkData(it, MediaMetadata.PICTURE_TYPE_FRONT_COVER) } }
+            .build()
+        return MediaItem.Builder()
+            .setMediaId(RANDOM_STATION_ID)
+            .setMediaMetadata(metadata)
+            .build()
+    }
+
+    // The app's own launcher glyph, reused as the Random Station icon —
+    // decoded once and cached rather than re-reading the resource per browse
+    // request.
+    private val randomStationArtwork: ByteArray? by lazy {
+        try {
+            val bitmap = BitmapFactory.decodeResource(resources, R.drawable.ic_launcher_foreground)
+            ByteArrayOutputStream().use { stream ->
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
+                stream.toByteArray()
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private suspend fun loadArtworkBytes(imageUrl: String?): ByteArray? {
         if (imageUrl.isNullOrBlank()) return null
         return try {
@@ -375,9 +519,38 @@ class RadioPlaybackService : MediaLibraryService() {
         }
     }
 
+    fun playPreviousStation() = playAdjacentStation(offset = -1)
+    fun playNextStation() = playAdjacentStation(offset = 1)
+
+    // Treats the same favourites-first-then-alphabetical order used by the
+    // Android Auto browse tree (StationLookup.getAllStations()) as a virtual
+    // playlist for previous/next, since stations aren't a real ExoPlayer
+    // multi-item playlist. Wraps around at either end.
+    private fun playAdjacentStation(offset: Int) {
+        val lookup = stationLookup ?: return
+        serviceScope.launch {
+            val stations = lookup.getAllStations()
+            if (stations.isEmpty()) return@launch
+            val currentIndex = stations.indexOfFirst { it.id == repository.currentStationId.value }
+            val nextIndex = if (currentIndex == -1) 0 else (currentIndex + offset).mod(stations.size)
+            val next = stations[nextIndex]
+            playStation(next.id, next.streamUrl, next.title, next.imageUrl)
+        }
+    }
+
     fun togglePlayPause() {
         val target = mediaSession.player
-        if (target.isPlaying) target.pause() else target.play()
+        if (target.isPlaying) {
+            target.pause()
+        } else {
+            target.play()
+            markPlayRequested()
+        }
+    }
+
+    private fun markPlayRequested() {
+        lastPlayRequestedAtMillis = System.currentTimeMillis()
+        suppressionRecoveryAttempted = false
     }
 
     fun startSleepTimer(durationMillis: Long) {
@@ -403,6 +576,68 @@ class RadioPlaybackService : MediaLibraryService() {
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             repository.updatePlayingState(isPlaying)
+        }
+
+        // The app never intentionally sets Player.volume below 1.0 anywhere
+        // (no in-app volume control) — the only known way it drops is
+        // ExoPlayer's own automatic audio-focus ducking, which is supposed
+        // to restore it back to 1.0 on regaining focus. Matches an
+        // intermittent, hard-to-reproduce report of audio going silent
+        // (often right when Android Auto connects) until manually muted and
+        // unmuted. Since a sub-1.0 volume is never legitimate here, self-heal
+        // regardless of root cause rather than chase the exact focus-timing
+        // race — cheap and safe.
+        override fun onVolumeChanged(volume: Float) {
+            Log.d("RadioPlaybackServiceAudio", "onVolumeChanged: $volume")
+            if (volume < 1f) {
+                mediaSession.player.volume = 1f
+            }
+        }
+
+        // Root cause confirmed via `dumpsys audio`: right as a new audio
+        // output device attaches (e.g. the car, connecting via Android
+        // Auto), this app's AudioTrack got created, muted, and had its
+        // routed device reassigned multiple times within about 12 seconds,
+        // ending in a pause that never auto-resumed — ExoPlayer's own
+        // audio-focus-regain handling getting stuck mid-race during that
+        // routing churn, not app-level state. playWhenReady stays true
+        // throughout (this is a *suppression*, not a real pause), so a
+        // manual mute/unmute — which forces the OS audio pipeline to
+        // re-evaluate the route — was the only thing that unstuck it.
+        //
+        // Reproducing that recovery automatically, BUT:
+        // 1. Bounded to shortly after we actually asked to play something
+        //    (lastPlayRequestedAtMillis) — an earlier version fired
+        //    unconditionally and force-resumed playback after the car was
+        //    turned off and disconnected, the opposite of what's wanted.
+        //    Suppression still present long after any play request is a
+        //    legitimate "nothing to play to" state, not the connect-time
+        //    race, and must be left alone.
+        // 2. One-shot per play request (suppressionRecoveryAttempted) — the
+        //    retry's own play() call re-triggers this same callback if the
+        //    suppression is genuinely persistent (e.g. no route at all),
+        //    which without this guard re-armed another retry every time,
+        //    looping every ~1-2s for the whole recovery window — confirmed
+        //    via dumpsys audio as rapid AudioTrack create/pause/release
+        //    cycling, not the intended single recovery attempt.
+        override fun onPlaybackSuppressionReasonChanged(playbackSuppressionReason: Int) {
+            Log.d("RadioPlaybackServiceAudio", "onPlaybackSuppressionReasonChanged: $playbackSuppressionReason")
+            if (playbackSuppressionReason == Player.PLAYBACK_SUPPRESSION_REASON_NONE) return
+            if (suppressionRecoveryAttempted) return
+            val target = mediaSession.player
+            val requestedAt = lastPlayRequestedAtMillis
+            serviceScope.launch {
+                delay(SUPPRESSION_RECOVERY_DELAY_MS)
+                val withinRecoveryWindow = System.currentTimeMillis() - requestedAt < SUPPRESSION_RECOVERY_WINDOW_MS
+                if (withinRecoveryWindow &&
+                    target.playWhenReady &&
+                    target.playbackSuppressionReason != Player.PLAYBACK_SUPPRESSION_REASON_NONE
+                ) {
+                    Log.w("RadioPlaybackServiceAudio", "Still suppressed after ${SUPPRESSION_RECOVERY_DELAY_MS}ms, forcing play() retry (one-shot)")
+                    suppressionRecoveryAttempted = true
+                    target.play()
+                }
+            }
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
@@ -458,6 +693,7 @@ class RadioPlaybackService : MediaLibraryService() {
             session: MediaSession,
             controller: MediaSession.ControllerInfo
         ): MediaSession.ConnectionResult {
+            Log.d("RadioPlaybackServiceAA", "onConnect from packageName=${controller.packageName}")
             val availableCommands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS
                 .buildUpon()
                 .add(SessionCommand(CMD_PLAY_STATION, Bundle.EMPTY))
@@ -465,10 +701,27 @@ class RadioPlaybackService : MediaLibraryService() {
                 .add(SessionCommand(CMD_SET_SLEEP_TIMER, Bundle.EMPTY))
                 .add(SessionCommand(CMD_CANCEL_SLEEP_TIMER, Bundle.EMPTY))
                 .build()
+
+            // Custom layout (shuffle button) is set session-wide in onCreate,
+            // not per-connection here — see transportCustomLayout. Previous/next
+            // are native seekToPrevious/seekToNext commands (StationSkippingPlayer),
+            // not custom session commands.
             return MediaSession.ConnectionResult.accept(
                 availableCommands,
                 MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS
             )
+        }
+
+        // Android Auto (wired or wireless) otherwise leaves playback running
+        // through the phone speaker after you drive off/unplug — stop it
+        // when that specific controller disconnects, rather than on any
+        // controller disconnect (the app's own UI controller disconnects
+        // and reconnects constantly, e.g. on backgrounding).
+        override fun onDisconnected(session: MediaSession, controller: MediaSession.ControllerInfo) {
+            Log.d("RadioPlaybackServiceAA", "onDisconnected from packageName=${controller.packageName}")
+            if (controller.packageName == ANDROID_AUTO_PACKAGE) {
+                mediaSession.player.pause()
+            }
         }
 
         override fun onCustomCommand(
@@ -534,9 +787,10 @@ class RadioPlaybackService : MediaLibraryService() {
             val future = SettableFuture.create<LibraryResult<ImmutableList<MediaItem>>>()
             serviceScope.launch {
                 val stations = stationLookup?.getAllStations().orEmpty()
-                val children = coroutineScope {
+                val stationItems = coroutineScope {
                     stations.map { async { buildBrowsableStub(it) } }.awaitAll()
                 }
+                val children = listOf(buildRandomStationStub()) + stationItems
                 future.set(LibraryResult.ofItemList(ImmutableList.copyOf(children), params))
             }
             return future
@@ -548,6 +802,10 @@ class RadioPlaybackService : MediaLibraryService() {
             mediaId: String
         ): ListenableFuture<LibraryResult<MediaItem>> {
             val future = SettableFuture.create<LibraryResult<MediaItem>>()
+            if (mediaId == RANDOM_STATION_ID) {
+                future.set(LibraryResult.ofItem(buildRandomStationStub(), null))
+                return future
+            }
             serviceScope.launch {
                 val station = stationLookup?.getStation(mediaId)
                 if (station == null) {
@@ -572,9 +830,19 @@ class RadioPlaybackService : MediaLibraryService() {
                     // mediaId and need the real stream URL looked up.
                     if (item.localConfiguration != null) {
                         item
+                    } else if (item.mediaId == RANDOM_STATION_ID) {
+                        // Resolved at tap time, not baked into the browse list, so it's
+                        // actually random each time rather than a fixed station.
+                        stationLookup?.getRandomStation(excludeId = repository.currentStationId.value)?.let {
+                            repository.updateCurrentStation(it.id)
+                            val built = buildPlayableMediaItem(it.id, it.streamUrl, it.title, it.imageUrl, loadArtworkBytes(it.imageUrl))
+                            if (castPlayer != null) built.withCastMimeType() else built
+                        }
                     } else {
                         stationLookup?.getStation(item.mediaId)?.let {
-                            buildPlayableMediaItem(it.id, it.streamUrl, it.title, it.imageUrl)
+                            repository.updateCurrentStation(it.id)
+                            val built = buildPlayableMediaItem(it.id, it.streamUrl, it.title, it.imageUrl, loadArtworkBytes(it.imageUrl))
+                            if (castPlayer != null) built.withCastMimeType() else built
                         }
                     }
                 }
@@ -607,6 +875,20 @@ class RadioPlaybackService : MediaLibraryService() {
 
     companion object {
         const val BROWSE_ROOT_ID = "static_radio_root"
+        const val RANDOM_STATION_ID = "static_radio_random"
+        const val SUPPRESSION_RECOVERY_DELAY_MS = 3000L
+        // The connect-time routing race observed via dumpsys settled within
+        // ~12s; this is a generous multiple of that so the watchdog only
+        // ever recovers a stuck *connect-time* suppression, never a
+        // legitimate later one (e.g. car turned off and disconnected).
+        const val SUPPRESSION_RECOVERY_WINDOW_MS = 20_000L
+
+        // The Android Auto phone-projection app's package — used to stop
+        // playback when a wired/wireless Auto session disconnects (see
+        // onDisconnected below) rather than continuing to play through the
+        // phone speaker once you've left the car.
+        const val ANDROID_AUTO_PACKAGE = "com.google.android.projection.gearhead"
+
         const val CMD_PLAY_STATION = "com.staticradio.app.PLAY_STATION"
         const val CMD_PLAY_RANDOM = "com.staticradio.app.PLAY_RANDOM"
         const val CMD_SET_SLEEP_TIMER = "com.staticradio.app.SET_SLEEP_TIMER"

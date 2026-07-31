@@ -2,9 +2,11 @@
 
 Source of truth for this project. Read this before writing code — it reflects
 the ACTUAL current state of the app (not the original plan), updated as of
-2026-07-28 after adding the Android Auto browse tree and working Chromecast
-support. The app builds, installs, and runs. Both a debug build and a signed
-release build are verified working as of this update.
+2026-07-31 after extensive real-car Android Auto polish (Random Station,
+transport buttons, artwork, mute-bug recovery, stop-on-disconnect) on top
+of the Chromecast support added earlier. The app builds, installs, and
+runs. Both a debug build and a signed release build are verified working
+as of this update.
 
 ## Concept
 Side-loadable Android internet radio app, user-curated stations only (manual
@@ -335,21 +337,106 @@ models. Saved Mixes' backup format is unrelated/unchanged.
   timer, live MM:SS countdown. The hour/minute +/- steppers now reserve a
   fixed-width number column so a 1-digit hour value and a 2-digit minute
   value don't make the two rows' button spacing look inconsistent.
-- Android Auto: `RadioPlaybackService` is now a `MediaLibraryService`
-  (was a plain `MediaSessionService`) with a real browse tree — root ->
-  flat, alphabetically-sorted list of every saved station, each a leaf
-  `MediaItem` built from `StationLookup.getAllStations()`. Manifest's
-  service intent-filter action changed accordingly to
-  `androidx.media3.session.MediaLibraryService`. Browse-tree items only
-  carry a mediaId + display metadata (no stream URI, kept lean); tapping
-  one in Android Auto round-trips it through `onAddMediaItems`, which
-  resolves the real `streamUrl` via `StationLookup.getStation(mediaId)`
-  and rebuilds a fully playable `MediaItem` — the same resolve-by-id
-  pattern backs `onGetItem` for single-item lookups. No folders (e.g.
-  Favorites-only) yet — deliberately flat per user preference, revisit if
-  the list gets unwieldy. **Not yet verified against a real car or the
-  Android Auto Desktop Head Unit** — build/install/logcat are clean, but
-  actual in-car browsing needs the user's own test.
+- Android Auto: `RadioPlaybackService` is a `MediaLibraryService` (was a
+  plain `MediaSessionService`) with a real browse tree — root -> a
+  synthetic "Random Station" entry (see below) followed by every saved
+  station, favourites first then alphabetical, each a leaf `MediaItem`
+  built from `StationLookup.getAllStations()` (★ prefix on favourited
+  titles). Manifest's service intent-filter declares **both**
+  `androidx.media3.session.MediaLibraryService` and the legacy
+  `android.media.browse.MediaBrowserService` action — without the
+  second, the app never appeared in Android Auto's app grid at all.
+  Extensively verified against a real car head unit across many rounds;
+  several non-obvious fixes were needed along the way:
+  - **Random Station**: a synthetic browse-tree entry (`RANDOM_STATION_ID`
+    constant), resolved to an actual random station only at tap time (in
+    `onAddMediaItems`, not baked into the browse list) so it's genuinely
+    random each time, matching the app's own shuffle button. Artwork is
+    the app's own launcher glyph, decoded from `R.drawable.
+    ic_launcher_foreground` and cached.
+  - **Previous/Next/Shuffle transport buttons**: implemented as a
+    `StationSkippingPlayer` (`ForwardingPlayer` wrapping whichever player
+    is active — local ExoPlayer or CastPlayer) that reports
+    `COMMAND_SEEK_TO_PREVIOUS`/`COMMAND_SEEK_TO_NEXT` as available and
+    maps `seekToPrevious()`/`seekToNext()` to previous/next *station*
+    (treating `StationLookup.getAllStations()`'s existing sort order as a
+    virtual playlist, wrapping at either end) — **not** custom
+    SessionCommand buttons with skip icons, which was the first attempt
+    and caused Android Auto's now-playing screen to render the buttons in
+    unstable, swapping positions (it was trying to reconcile custom
+    buttons against the native skip slots it always expects to exist).
+    Shuffle has no native equivalent, so it stays a genuine custom
+    `CommandButton` (`ICON_SHUFFLE_ON` → `CMD_PLAY_RANDOM`). The custom
+    layout is set **session-wide** via `mediaSession.setCustomLayout(...)`
+    in `onCreate`, not per-controller via `ConnectionResult` — a
+    per-controller attempt scoped to just Android Auto's package name
+    didn't reliably reach its actual UI (Auto likely connects through the
+    legacy `MediaBrowserServiceCompat` bridge for some purposes, and
+    per-connection custom layouts don't thread through that the same
+    way); session-wide is what legacy `PlaybackStateCompat` custom
+    actions actually get built from. Side effect: these buttons now also
+    show in the phone's own notification/lock screen, not just Android
+    Auto.
+  - Because `mediaSession.player` is now always the `StationSkippingPlayer`
+    wrapper, code that used to type-check it directly (`is CastPlayer`,
+    `=== player`) had to switch to checking `castPlayer`'s nullness
+    instead (the existing signal for "currently routing to cast").
+  - **Artwork in the dual-app "now playing" card** (Android Auto + another
+    app like Maps, side by side): only Radio-Browser-sourced (http) images
+    showed; manually uploaded/URL images didn't. An initial fix embedded
+    artwork bytes *after* playback started (async, via `replaceMediaItem`)
+    — the same technique that fixed browse-tree artwork — but this
+    surface apparently reads metadata once at play-start and never
+    re-checks, so a late patch was invisible to it. Fixed properly by
+    resolving artwork bytes *before* the item is ever handed to the
+    player (`playStation` now launches a coroutine, resolves bytes via
+    `loadArtworkBytes`, then builds the `MediaItem`) — Coil's cache keeps
+    this fast in the common case, since the station's image was almost
+    always already loaded once elsewhere (e.g. a list/grid card) before
+    it's played.
+  - **Mute bug**: intermittent, hard-to-reproduce reports of audio going
+    silent — often right as Android Auto connects — needing a manual
+    mute/unmute to recover. Root-caused via `adb shell dumpsys audio`:
+    this app's `AudioTrack` gets created, muted, and has its routed
+    device reassigned multiple times within about 12 seconds right as the
+    car's audio device attaches, ending in a playback *suppression*
+    (`Player.playbackSuppressionReason != NONE`, `playWhenReady` stays
+    `true`) that never auto-resolves — ExoPlayer's own audio-focus-regain
+    handling getting stuck mid-race during that routing churn, not
+    something app code did. Fixed with a watchdog in `playerListener.
+    onPlaybackSuppressionReasonChanged`: if still suppressed
+    `SUPPRESSION_RECOVERY_DELAY_MS` (3s) later, force a `play()` retry —
+    reproducing what a manual mute/unmute achieves (forces the OS audio
+    pipeline to re-evaluate the route). Two important guards, both added
+    after real regressions during testing:
+    - **Bounded to `SUPPRESSION_RECOVERY_WINDOW_MS`** (20s) after the last
+      explicit play request (`lastPlayRequestedAtMillis`, updated by
+      `playStation`/`switchToCast`/`togglePlayPause`-to-play). An
+      unbounded first version force-resumed playback through the phone
+      speaker after the user had turned the car off and disconnected —
+      suppression still present long after any play request is a
+      *legitimate* "nothing to play to" state, not the connect-time race.
+    - **One-shot per play request** (`suppressionRecoveryAttempted`).
+      Without this, the retry's own `play()` call re-triggers the same
+      suppression callback if the cause is genuinely persistent (e.g. no
+      route at all), re-arming another retry — confirmed via `dumpsys
+      audio` as rapid `AudioTrack` create/pause/release cycling roughly
+      every 1-2 seconds for the whole recovery window, not a single
+      recovery attempt.
+  - **Stop playback on Android Auto disconnect**: two earlier attempts
+    didn't reliably work — pausing on `MediaSession.Callback.
+    onDisconnected` gated by the Android Auto package name
+    (`ANDROID_AUTO_PACKAGE = "com.google.android.projection.gearhead"`,
+    kept in place as a harmless extra layer), and ExoPlayer's built-in
+    `setHandleAudioBecomingNoisy(true)` (also kept). What actually works:
+    a directly-registered `AudioManager.AudioDeviceCallback`
+    (`audioDeviceCallback`, registered after `mediaSession` exists to
+    avoid a theoretical init-order race) — `onAudioDevicesRemoved` pauses
+    playback whenever a removed device is a sink and isn't the phone's
+    own built-in speaker/earpiece. This is a direct OS-level audio
+    hardware signal, independent of Android Auto's specific session
+    protocol or of exactly when `ACTION_AUDIO_BECOMING_NOISY` does or
+    doesn't fire for a given device.
 
 ## Features built
 - **Home**: top bar is a 3-way segmented button (List/Grid/Map) + Filter +
@@ -500,11 +587,12 @@ several more within this session alone (see "Features built").
    previous bug there (grabbed an arbitrary image instead of the matching
    one) was fixed but is easy to reintroduce if mix ID generation/export
    ever changes.
-5. Android Auto: `MediaLibraryService` browse tree implemented (see
-   "Playback details worth knowing") — full station-list picking from the
-   car screen, not just play/pause. Still needs real-car or DHU
-   verification (not yet done as of this update). No folders/Favorites
-   split yet, deliberately flat.
+5. Android Auto: `MediaLibraryService` browse tree, Random Station entry,
+   native previous/next + custom shuffle transport buttons, correct
+   artwork, mute-bug recovery, and stop-on-disconnect are all implemented
+   and verified against a real car head unit across many rounds (see
+   "Playback details worth knowing" for the full list of fixes and why
+   each was needed). No folders/Favorites split yet, deliberately flat.
 6. `CountryTimeZones.kt`'s country→timezone map is best-effort (~45
    countries, one representative zone each) — genuinely wrong for the
    sliver of listeners in a non-representative zone of a multi-zone country
