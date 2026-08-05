@@ -98,17 +98,24 @@ touches Google Play Services, and only once the user turns it on.
   AGP signs with v2 by default, which `jarsigner` can't see, reporting a
   false "jar is unsigned"). Located at
   `C:\Users\ollie\AppData\Local\Android\Sdk\build-tools\36.0.0\apksigner.bat`.
-- `versionCode = 2`, `versionName = "1.0"` as of this update (bumped from the
-  original `1` / `"0.1.0"` placeholder once the app reached a substantial,
-  intentionally-versioned "1.0" feature set). Bump both again for the next
-  meaningfully different release build.
+- `versionCode = 5`, `versionName = "1.3"` as of this update (started at
+  `1`/`"0.1.0"`, bumped once per meaningfully different release since:
+  1.0 first public release, 1.1 Android Auto browse tree, 1.2 Chromecast,
+  1.3 Android Auto polish round — see README's Changelog section for
+  what shipped in each). Bump both again for the next release build.
 
 ## Architecture decisions
 - Kotlin + Jetpack Compose, single-module app (`com.staticradio.app`)
 - Media3 (ExoPlayer + MediaSession) for playback, in `RadioPlaybackService`
-  (a `MediaSessionService`). UI talks to it via `RadioController` wrapping
-  `MediaController` + custom SessionCommands (`PLAY_STATION`, `PLAY_RANDOM`,
-  `SET_SLEEP_TIMER`, `CANCEL_SLEEP_TIMER`). ExoPlayer is built with:
+  (a `MediaLibraryService`, not just `MediaSessionService` — needed for the
+  Android Auto browse tree, see "Playback details worth knowing"). UI talks
+  to it via `RadioController` wrapping `MediaController` + custom
+  SessionCommands (`PLAY_STATION`, `PLAY_RANDOM`, `SET_SLEEP_TIMER`,
+  `CANCEL_SLEEP_TIMER` — previous/next station are native `seekToPrevious`/
+  `seekToNext` commands, not custom ones, see the Android Auto section).
+  `MainActivity` is a `FragmentActivity` (not plain `ComponentActivity`) —
+  required by Chromecast's `MediaRouteButton` device-picker dialog. ExoPlayer
+  is built with:
   - a custom `DefaultRenderersFactory` overriding `buildAudioSink` to inject
     `AutoGainAudioProcessor` (real-time software AGC — no loudness metadata
     exists in internet radio streams, so it measures short-term RMS and
