@@ -13,6 +13,9 @@ import java.net.URLEncoder
 fun detectMixSource(url: String): MixSource = when {
     url.contains("soundcloud.com", ignoreCase = true) -> MixSource.SOUNDCLOUD
     url.contains("mixcloud.com", ignoreCase = true) -> MixSource.MIXCLOUD
+    // Covers m./music./www. subdomains via the bare domain, plus youtu.be share links
+    url.contains("youtube.com", ignoreCase = true) -> MixSource.YOUTUBE
+    url.contains("youtu.be", ignoreCase = true) -> MixSource.YOUTUBE
     else -> MixSource.OTHER
 }
 
@@ -20,8 +23,15 @@ fun detectMixSource(url: String): MixSource = when {
 data class OEmbedResponse(
     val title: String? = null,
     @SerialName("author_name") val authorName: String? = null,
-    @SerialName("thumbnail_url") val thumbnailUrl: String? = null
-)
+    @SerialName("thumbnail_url") val thumbnailUrl: String? = null,
+    // Mixcloud returns its artwork here instead of thumbnail_url (SoundCloud
+    // and YouTube use the spec's thumbnail_url). Only mapping thumbnail_url is
+    // why Mixcloud imports came in with no image while SoundCloud ones worked.
+    val image: String? = null
+) {
+    /** Whichever field this provider happens to put its artwork in. */
+    val artworkUrl: String? get() = thumbnailUrl?.takeIf { it.isNotBlank() } ?: image?.takeIf { it.isNotBlank() }
+}
 
 /**
  * Official oEmbed endpoints — legitimate, ToS-compliant metadata source for
@@ -36,6 +46,7 @@ suspend fun fetchOEmbed(url: String, source: MixSource): OEmbedResponse? = withC
     val endpoint = when (source) {
         MixSource.SOUNDCLOUD -> "https://soundcloud.com/oembed?format=json&url=" + URLEncoder.encode(url, "UTF-8")
         MixSource.MIXCLOUD -> "https://www.mixcloud.com/oembed/?format=json&url=" + URLEncoder.encode(url, "UTF-8")
+        MixSource.YOUTUBE -> "https://www.youtube.com/oembed?format=json&url=" + URLEncoder.encode(url, "UTF-8")
         MixSource.OTHER -> return@withContext null
     }
     runCatching {

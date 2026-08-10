@@ -13,10 +13,11 @@ import com.staticradio.app.MainActivity
 import com.staticradio.app.R
 import com.staticradio.app.StaticRadioApp
 import com.staticradio.app.data.StationLookupImpl
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Metadata
-import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import android.util.Log
 import androidx.media3.common.Player
@@ -61,6 +62,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.util.concurrent.TimeUnit
 import java.io.ByteArrayOutputStream
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -122,15 +125,38 @@ class RadioPlaybackService : MediaLibraryService() {
     // routing state instead, which nothing else in the pipeline depends on.
     private val audioDeviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
-            val externalDeviceRemoved = removedDevices.any {
-                it.isSink && it.type != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER && it.type != AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
-            }
-            if (externalDeviceRemoved) {
-                Log.d("RadioPlaybackServiceAudio", "External audio output removed, pausing")
-                mediaSession.player.pause()
+            val removedSinkIds = removedDevices.filter { it.isExternalSink() }.map { it.id }
+            if (removedSinkIds.isEmpty()) return
+            Log.d("RadioPlaybackServiceAudio", "External sinks removed: " +
+                removedDevices.filter { it.isExternalSink() }.joinToString { "id=${it.id} type=${it.type}" })
+            // The car's audio device gets reported removed-then-re-added
+            // during the connect-time routing churn documented in
+            // onPlaybackSuppressionReasonChanged below, not just at a genuine
+            // disconnect, so this waits before acting. The recheck asks
+            // specifically whether *these* devices came back (by id) — an
+            // earlier version asked whether ANY external sink was present,
+            // which is always true on a phone (telephony, paired Bluetooth
+            // and friends all sit in the output-device list permanently), so
+            // it never paused at all and playback kept running on the phone
+            // after unplugging.
+            serviceScope.launch {
+                delay(DEVICE_REMOVAL_DEBOUNCE_MS)
+                val currentIds = (getSystemService(AUDIO_SERVICE) as AudioManager)
+                    .getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                    .map { it.id }
+                    .toSet()
+                if (removedSinkIds.none { it in currentIds }) {
+                    Log.d("RadioPlaybackServiceAudio", "External audio output stayed gone, pausing")
+                    mediaSession.player.pause()
+                } else {
+                    Log.d("RadioPlaybackServiceAudio", "External audio output came back, not pausing")
+                }
             }
         }
     }
+
+    private fun AudioDeviceInfo.isExternalSink(): Boolean =
+        isSink && type != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER && type != AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
 
     override fun onCreate() {
         super.onCreate()
@@ -177,6 +203,25 @@ class RadioPlaybackService : MediaLibraryService() {
             .setMediaSourceFactory(mediaSourceFactory)
             .setRenderersFactory(renderersFactory)
             .setLoadControl(loadControl)
+            // Requests real audio focus. Media3 does NOT do this by default —
+            // handleAudioFocus defaults to false, and this call was missing
+            // entirely, so the app streamed audio without ever holding focus.
+            // On a phone that mostly still makes noise, which is why it went
+            // unnoticed; in a car it doesn't. Android Auto's head unit only
+            // opens its media channel for a stream that has claimed media
+            // focus, so playback ran "successfully" into a channel the car
+            // kept muted — matching the symptom exactly (shows as playing,
+            // silent until the car's own mute/unmute forces the amp to
+            // re-open the channel). Declaring USAGE_MEDIA/CONTENT_TYPE_MUSIC
+            // also tells the car this is music rather than an unclassified
+            // stream, which is what its audio policy routes and ducks on.
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(C.USAGE_MEDIA)
+                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                    .build(),
+                /* handleAudioFocus = */ true
+            )
             // Pauses automatically when the current audio output disappears
             // (ACTION_AUDIO_BECOMING_NOISY) — covers headphone unplug and,
             // relevantly, disconnecting from Android Auto (wired or
@@ -322,11 +367,17 @@ class RadioPlaybackService : MediaLibraryService() {
         if (castPlayer != null) return
         player.pause() // keep the local ExoPlayer instance alive (paused) so switching back doesn't need to rebuild it
         val cp = CastPlayer(ctx, LiveStreamMediaItemConverter()).apply { addListener(playerListener) }.also { castPlayer = it }
-        player.currentMediaItem?.let {
-            cp.setMediaItem(it.withCastMimeType())
-            cp.prepare()
-            cp.playWhenReady = true
-            markPlayRequested()
+        player.currentMediaItem?.let { item ->
+            // Launched rather than inline: the content-type sniff does network
+            // I/O. Assigning mediaSession.player below stays synchronous so
+            // the session never briefly points at the old local player.
+            serviceScope.launch {
+                val contentType = sniffCastContentType(item.localConfiguration?.uri?.toString())
+                cp.setMediaItem(item.withCastMimeType(contentType))
+                cp.prepare()
+                cp.playWhenReady = true
+                markPlayRequested()
+            }
         }
         mediaSession.player = StationSkippingPlayer(cp, ::playPreviousStation, ::playNextStation)
     }
@@ -373,7 +424,9 @@ class RadioPlaybackService : MediaLibraryService() {
             // mediaSession.player is always wrapped in StationSkippingPlayer now,
             // so it's never literally `is CastPlayer` — castPlayer's nullness is
             // the actual signal for "currently routing to cast".
-            target.setMediaItem(if (castPlayer != null) item.withCastMimeType() else item)
+            target.setMediaItem(
+                if (castPlayer != null) item.withCastMimeType(sniffCastContentType(streamUrl)) else item
+            )
             target.prepare()
             target.playWhenReady = true
             markPlayRequested()
@@ -383,13 +436,61 @@ class RadioPlaybackService : MediaLibraryService() {
     // CastPlayer's DefaultMediaItemConverter requires an explicit mimeType to
     // build its Cast queue item (throws otherwise) — local ExoPlayer doesn't
     // need one, it auto-detects via extractors, so buildPlayableMediaItem()
-    // itself deliberately doesn't set one. Applied wherever an item might be
-    // handed to a CastPlayer: here and in switchToCast(). Stations don't
-    // carry known codec info, so this is a best-effort default rather than
-    // something determined per-station; audio/mpeg covers the large majority
-    // of icecast/shoutcast streams.
-    private fun MediaItem.withCastMimeType(): MediaItem =
-        buildUpon().setMimeType(MimeTypes.AUDIO_MPEG).build()
+    // itself deliberately doesn't set one.
+    //
+    // This used to hardcode audio/mpeg for every station, which is simply
+    // wrong for the AAC/HE-AAC stations that are common now — Operator Radio
+    // serves audio/aacp, for one, despite advertising icy-br 320 and having
+    // no codec hint in its URL. Receivers have been sniffing past the wrong
+    // value rather than failing outright, so it went unnoticed, but declaring
+    // the real type is what the Cast API asks for. Read from the stream's own
+    // Content-Type and cached per URL, so repeat casts of a station don't
+    // re-request.
+    private val sniffedContentTypes = mutableMapOf<String, String>()
+
+    private val sniffClient by lazy {
+        OkHttpClient.Builder().callTimeout(5, TimeUnit.SECONDS).build()
+    }
+
+    private suspend fun sniffCastContentType(streamUrl: String?): String {
+        if (streamUrl.isNullOrBlank()) return CAST_DEFAULT_CONTENT_TYPE
+        sniffedContentTypes[streamUrl]?.let { return it }
+        val resolved = withContext(Dispatchers.IO) {
+            runCatching {
+                // GET, not HEAD — plenty of Icecast/Shoutcast servers answer
+                // HEAD with an error or something useless. The body is closed
+                // without being read, so this costs one set of response
+                // headers rather than any audio.
+                val request = Request.Builder().url(streamUrl)
+                    .header("Icy-MetaData", "0")
+                    .build()
+                sniffClient.newCall(request).execute().use { it.header("Content-Type") }
+            }.getOrNull().let(::castContentTypeFor)
+        }
+        sniffedContentTypes[streamUrl] = resolved
+        return resolved
+    }
+
+    private fun castContentTypeFor(contentType: String?): String {
+        val value = contentType?.substringBefore(';')?.trim()?.lowercase()
+            ?: return CAST_DEFAULT_CONTENT_TYPE
+        return when {
+            // audio/aacp (HE-AAC) and audio/aac are both raw ADTS to a receiver
+            value.contains("aac") -> "audio/aac"
+            value.contains("mp4") -> "audio/mp4"
+            value.contains("flac") -> "audio/flac"
+            value.contains("opus") || value.contains("ogg") -> "audio/ogg"
+            value.contains("wav") -> "audio/wav"
+            value.contains("mpeg") || value.contains("mp3") -> "audio/mpeg"
+            // Unrecognised: keep the old default rather than declaring
+            // something specific and wrong — receivers cope better with a
+            // generic type they can sniff past than a confident mismatch.
+            else -> CAST_DEFAULT_CONTENT_TYPE
+        }
+    }
+
+    private fun MediaItem.withCastMimeType(contentType: String): MediaItem =
+        buildUpon().setMimeType(contentType).build()
 
     /**
      * Shared by direct playback, the Android Auto browse tree, and
@@ -578,6 +679,24 @@ class RadioPlaybackService : MediaLibraryService() {
             repository.updatePlayingState(isPlaying)
         }
 
+        // Diagnostic only. Every unexplained "it paused itself" report so far
+        // has been guesswork about which layer paused; this reports the
+        // reason the platform itself attributes to the change, which
+        // distinguishes an audio-focus loss from a becoming-noisy route
+        // change from a remote controller (Android Auto, notification,
+        // headset button) from a genuine in-app tap.
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            val reasonName = when (reason) {
+                Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST -> "USER_REQUEST"
+                Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS -> "AUDIO_FOCUS_LOSS"
+                Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY -> "AUDIO_BECOMING_NOISY"
+                Player.PLAY_WHEN_READY_CHANGE_REASON_REMOTE -> "REMOTE"
+                Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM -> "END_OF_MEDIA_ITEM"
+                else -> "UNKNOWN($reason)"
+            }
+            Log.d("RadioPlaybackServiceAudio", "onPlayWhenReadyChanged: playWhenReady=$playWhenReady reason=$reasonName")
+        }
+
         // The app never intentionally sets Player.volume below 1.0 anywhere
         // (no in-app volume control) — the only known way it drops is
         // ExoPlayer's own automatic audio-focus ducking, which is supposed
@@ -623,6 +742,14 @@ class RadioPlaybackService : MediaLibraryService() {
         override fun onPlaybackSuppressionReasonChanged(playbackSuppressionReason: Int) {
             Log.d("RadioPlaybackServiceAudio", "onPlaybackSuppressionReasonChanged: $playbackSuppressionReason")
             if (playbackSuppressionReason == Player.PLAYBACK_SUPPRESSION_REASON_NONE) return
+            // Now that the player actually manages audio focus (see
+            // setAudioAttributes in onCreate), a transient-focus-loss
+            // suppression is legitimate and self-resolving — it's how the car
+            // ducks music under a navigation prompt or Assistant reply.
+            // Forcing play() through it would talk over the very thing that
+            // asked for silence, so leave that reason alone; the watchdog is
+            // only for a suppression that never resolves on its own.
+            if (playbackSuppressionReason == Player.PLAYBACK_SUPPRESSION_REASON_TRANSIENT_AUDIO_FOCUS_LOSS) return
             if (suppressionRecoveryAttempted) return
             val target = mediaSession.player
             val requestedAt = lastPlayRequestedAtMillis
@@ -633,8 +760,18 @@ class RadioPlaybackService : MediaLibraryService() {
                     target.playWhenReady &&
                     target.playbackSuppressionReason != Player.PLAYBACK_SUPPRESSION_REASON_NONE
                 ) {
-                    Log.w("RadioPlaybackServiceAudio", "Still suppressed after ${SUPPRESSION_RECOVERY_DELAY_MS}ms, forcing play() retry (one-shot)")
+                    // target.play() alone is a no-op here: playWhenReady is
+                    // already true, so ExoPlayer sees no state change and
+                    // never re-requests audio focus or recreates the
+                    // AudioTrack — which is exactly why this watchdog wasn't
+                    // actually recovering anything before. A manual
+                    // mute/unmute works because it's a real transition that
+                    // forces the OS to re-evaluate the route; pause() then
+                    // play() reproduces that from code (false->true is a
+                    // genuine change, unlike true->true).
+                    Log.w("RadioPlaybackServiceAudio", "Still suppressed after ${SUPPRESSION_RECOVERY_DELAY_MS}ms, forcing pause/play retry (one-shot)")
                     suppressionRecoveryAttempted = true
+                    target.pause()
                     target.play()
                 }
             }
@@ -712,16 +849,22 @@ class RadioPlaybackService : MediaLibraryService() {
             )
         }
 
-        // Android Auto (wired or wireless) otherwise leaves playback running
-        // through the phone speaker after you drive off/unplug — stop it
-        // when that specific controller disconnects, rather than on any
-        // controller disconnect (the app's own UI controller disconnects
-        // and reconnects constantly, e.g. on backgrounding).
+        // Deliberately does NOT pause on an Android Auto controller
+        // disconnect any more, only logs. It used to, as a "harmless extra
+        // layer" for stopping playback when you leave the car — it was not
+        // harmless. Android Auto connects more than one controller (a
+        // browse controller separate from the playback one) and drops the
+        // browse controller during normal use, e.g. whenever you navigate
+        // away from STATIC to another screen like Maps. Every one of those
+        // routine disconnects hard-paused playback, needing a manual tap on
+        // play to resume — the reported "randomly pauses itself". It also
+        // never achieved what it was added for: on a real unplug the whole
+        // session tears down without delivering this callback, which is why
+        // playback kept running on the phone regardless. Stopping on a genuine
+        // disconnect is handled by audioDeviceCallback, on the actual audio
+        // routing signal.
         override fun onDisconnected(session: MediaSession, controller: MediaSession.ControllerInfo) {
             Log.d("RadioPlaybackServiceAA", "onDisconnected from packageName=${controller.packageName}")
-            if (controller.packageName == ANDROID_AUTO_PACKAGE) {
-                mediaSession.player.pause()
-            }
         }
 
         override fun onCustomCommand(
@@ -836,13 +979,13 @@ class RadioPlaybackService : MediaLibraryService() {
                         stationLookup?.getRandomStation(excludeId = repository.currentStationId.value)?.let {
                             repository.updateCurrentStation(it.id)
                             val built = buildPlayableMediaItem(it.id, it.streamUrl, it.title, it.imageUrl, loadArtworkBytes(it.imageUrl))
-                            if (castPlayer != null) built.withCastMimeType() else built
+                            if (castPlayer != null) built.withCastMimeType(sniffCastContentType(it.streamUrl)) else built
                         }
                     } else {
                         stationLookup?.getStation(item.mediaId)?.let {
                             repository.updateCurrentStation(it.id)
                             val built = buildPlayableMediaItem(it.id, it.streamUrl, it.title, it.imageUrl, loadArtworkBytes(it.imageUrl))
-                            if (castPlayer != null) built.withCastMimeType() else built
+                            if (castPlayer != null) built.withCastMimeType(sniffCastContentType(it.streamUrl)) else built
                         }
                     }
                 }
@@ -882,6 +1025,16 @@ class RadioPlaybackService : MediaLibraryService() {
         // ever recovers a stuck *connect-time* suppression, never a
         // legitimate later one (e.g. car turned off and disconnected).
         const val SUPPRESSION_RECOVERY_WINDOW_MS = 20_000L
+
+        // How long to wait after an external audio sink is reported removed
+        // before actually pausing — long enough to ride out the connect-time
+        // device reassignment churn (see onPlaybackSuppressionReasonChanged)
+        // without meaningfully delaying a real disconnect's stop-on-exit.
+        const val DEVICE_REMOVAL_DEBOUNCE_MS = 1500L
+
+        // Fallback when a stream's Content-Type is missing or unrecognised —
+        // the old unconditional hardcoded value, now only a last resort.
+        const val CAST_DEFAULT_CONTENT_TYPE = "audio/mpeg"
 
         // The Android Auto phone-projection app's package — used to stop
         // playback when a wired/wireless Auto session disconnects (see

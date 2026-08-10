@@ -104,7 +104,7 @@ class MixFormViewModel(
                 if (oembed != null) {
                     _fullTitle.value = oembed.title.orEmpty()
                     _artist.value = oembed.authorName.orEmpty()
-                    _image.value = oembed.thumbnailUrl.orEmpty()
+                    _image.value = oembed.artworkUrl.orEmpty()
                 }
             }
         }

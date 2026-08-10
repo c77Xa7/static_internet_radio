@@ -2,11 +2,19 @@
 
 Source of truth for this project. Read this before writing code — it reflects
 the ACTUAL current state of the app (not the original plan), updated as of
-2026-07-31 after extensive real-car Android Auto polish (Random Station,
-transport buttons, artwork, mute-bug recovery, stop-on-disconnect) on top
-of the Chromecast support added earlier. The app builds, installs, and
-runs. Both a debug build and a signed release build are verified working
-as of this update.
+2026-08-10 (v1.4), when the three long-running Android Auto complaints were
+finally root-caused properly: silent playback (the app had never requested
+audio focus), random self-pausing (an Auto browse-controller disconnect
+being misread as leaving the car) and playback continuing after unplug. The
+same round also root-caused the ~15s Chromecast stall, which this document
+previously recorded as inherent and unfixable — **it is neither**; see the
+Chromecast section. The app builds, installs, and runs.
+
+**Two corrections worth reading before trusting older notes below**: several
+conclusions recorded here confidently turned out to be wrong (cast lag
+"inherent, out of scope"; the `onDisconnected` pause "a harmless extra
+layer"). Where a note explains why something *can't* be fixed, treat it as a
+hypothesis that was never disproved rather than an established fact.
 
 ## Concept
 Side-loadable Android internet radio app, user-curated stations only (manual
@@ -98,10 +106,11 @@ touches Google Play Services, and only once the user turns it on.
   AGP signs with v2 by default, which `jarsigner` can't see, reporting a
   false "jar is unsigned"). Located at
   `C:\Users\ollie\AppData\Local\Android\Sdk\build-tools\36.0.0\apksigner.bat`.
-- `versionCode = 5`, `versionName = "1.3"` as of this update (started at
+- `versionCode = 6`, `versionName = "1.4"` as of this update (started at
   `1`/`"0.1.0"`, bumped once per meaningfully different release since:
   1.0 first public release, 1.1 Android Auto browse tree, 1.2 Chromecast,
-  1.3 Android Auto polish round — see README's Changelog section for
+  1.3 Android Auto polish round, 1.4 Android Auto audio-focus/pause/
+  disconnect fixes + YouTube mixes — see README's Changelog section for
   what shipped in each). Bump both again for the next release build.
 
 ## Architecture decisions
@@ -165,10 +174,19 @@ touches Google Play Services, and only once the user turns it on.
     specify its mimeType`) unless the `MediaItem` has an explicit
     `mimeType` — local ExoPlayer doesn't need one (auto-detects via
     extractors), so `buildPlayableMediaItem()` deliberately doesn't set
-    one; a `MediaItem.withCastMimeType()` extension applies `audio/mpeg`
-    (a guess — stations don't carry known codec info) only when the
-    active player is a `CastPlayer`, in both `switchToCast` and
-    `playStation`.
+    one; a `MediaItem.withCastMimeType(contentType)` extension applies it
+    only when a cast session is active. This used to hardcode
+    `audio/mpeg` for every station, which is wrong for the AAC/HE-AAC
+    stations that are common now (Operator Radio serves `audio/aacp`
+    despite an `icy-br` of 320 and no codec hint in its URL — receivers
+    had been sniffing past the wrong value rather than failing, so it
+    went unnoticed). `sniffCastContentType()` now reads the stream's real
+    `Content-Type` and maps it (aac/aacp → `audio/aac`, plus mp4, flac,
+    ogg/opus, wav), cached per URL. Deliberately a GET with the body
+    closed unread, not a HEAD — plenty of Icecast/Shoutcast servers
+    answer HEAD with an error or nothing useful. Unrecognised types fall
+    back to `audio/mpeg` (`CAST_DEFAULT_CONTENT_TYPE`), since a generic
+    type a receiver can sniff past beats a confident mismatch.
   - `DefaultMediaItemConverter` also hardcodes `MediaInfo.
     STREAM_TYPE_BUFFERED` (on-demand, with the receiver assuming a known
     duration) for every item, with no way to override it via `MediaItem`.
@@ -183,16 +201,29 @@ touches Google Play Services, and only once the user turns it on.
     `CastOptionsProvider` sets `CastMediaOptions.Builder().
     setMediaSessionEnabled(false)` to suppress it; without this it showed
     as duplicate near-identical "now playing" notification cards.
-  - **Known, accepted limitation**: casting a raw Icecast/Shoutcast MP3
-    stream (no container/manifest, ICY metadata interleaved in the audio
-    bytes) has a consistent ~15–16s stall shortly after playback starts,
-    reproduced identically across two different Cast receiver brands —
-    playback is correct, just slow to truly start/settle. This looks
-    inherent to how Cast receivers (built around manifest-based formats
-    like HLS/DASH) handle raw progressive-MP3 live streams, not something
-    fixable client-side without server-side transcoding into a
-    Cast-friendly format — out of scope. `STREAM_TYPE_LIVE` (above) didn't
-    change this measurably; it's still correct to set, just wasn't the
+  - **The ~15s cast stall — root-caused 2026-08-10, and the earlier
+    "inherent, not fixable client-side" conclusion recorded here was
+    WRONG.** It has nothing to do with raw-vs-manifest formats or with
+    the codec. The receiver simply won't start until it holds roughly
+    **240–256KB** of audio, and it accumulates that at whatever rate the
+    origin server feeds it. Icecast's `burst-on-connect` is the entire
+    variable: a server that dumps a big chunk on connect clears the bar
+    instantly, one that doesn't makes you wait for it at 1x realtime
+    (256KB ÷ 16KB/s at 128kbps ≈ 16s — the observed stall). Measured
+    delivery in the first second, which is what settled it:
+    - Operator Radio (320kbps): **1,014,337 bytes** burst → casts instantly
+    - SomaFM Groove Salad (128kbps): **278,528 bytes** burst → ~1s
+    - stations with little/no burst → the full ~15s
+    Note this also explains why bitrate barely correlates with the stall
+    (an earlier hypothesis, disproved by testing 128 vs 256kbps): what
+    matters is the server's burst size in bytes, not its bitrate.
+    Verified end-to-end with a bench proxy that pre-buffered ~1MB and
+    served it at LAN speed — that URL cast **instantly** where the same
+    audio from its origin did not.
+    **This is therefore fixable client-side**, without any server-side
+    transcoding: see "Known gaps / next steps" for the shadow-buffer
+    proxy design. Not yet implemented as of 1.4.
+    `STREAM_TYPE_LIVE` (above) is still correct to set, but was never the
     dominant cause.
 - `PlaybackRepository` is the StateFlow bridge between service and UI
   (currentStationId, isPlaying, isBuffering, nowPlayingText, playbackError —
@@ -281,8 +312,15 @@ energetic, heavy, crowd safe, calm, educational. Style = DJ set, Radio show,
 Talk Show.
 
 ### Saved Mixes (`ui/mixes/`)
-Bookmarks for SoundCloud/Mixcloud DJ mixes — everything user-defined.
+Bookmarks for SoundCloud/Mixcloud/YouTube DJ mixes — everything user-defined.
 `MixEntity` + child `MixTrackEntity` (tracklist) via `MixDao`.
+
+`MixSource` is `{ SOUNDCLOUD, MIXCLOUD, YOUTUBE, OTHER }`. There are **no
+`TypeConverters` anywhere in this project** — Room stores enums by name, so
+adding a constant here is schema-compatible: no `@Database` version bump and
+no data wipe. Detection is substring-based in `detectMixSource()`
+(`youtube.com` covers the m./music./www. subdomains; `youtu.be` covers share
+links).
 
 Fields: url, fullTitle, artist, mixTitle, sourceRadio, **genre** (comma-
 delimited multi-select via `GenreVocabularyField`, same as stations — was a
@@ -299,9 +337,20 @@ description, dateAddedEpochMillis, tracklist.
   only background. Empty state (no mixes yet) sits just under the top bar
   with a readable background card, mentions the SoundCloud/Mixcloud
   share-to-prefill flow.
-- **Source logos**: real brand PNGs at `res/drawable/soundcloud_logo.png`
-  and `mixcloud_logo.png` via `ui/mixes/SourceLogos.kt` — do NOT revert to
-  hand-drawn Canvas icons.
+- **Source logos**: real brand PNGs at `res/drawable/soundcloud_logo.png`,
+  `mixcloud_logo.png` and `youtube_logo.png` via `ui/mixes/SourceLogos.kt`
+  — do NOT revert to hand-drawn Canvas icons. All are 512x512 squares of
+  edge-to-edge brand colour, since the composables clip to `CircleShape`;
+  a logo with padding around it renders as a shrunken badge with a ring of
+  backdrop, so crop tight to the artwork and mask the background out before
+  adding one. Note also that **AVIF source files must be converted to PNG**
+  — AVIF only decodes on API 31+ and minSdk here is 26.
+- **oEmbed artwork field differs per provider**: SoundCloud and YouTube use
+  the spec's `thumbnail_url`, **Mixcloud returns `image` instead**. Mapping
+  only `thumbnail_url` is why Mixcloud imports silently arrived with no
+  artwork while SoundCloud's worked; `OEmbedResponse.artworkUrl` resolves
+  whichever is present. (Mixcloud's endpoint also 301s from `www.` to
+  `app.mixcloud.com` — fine, OkHttp follows redirects by default.)
 - **Add/Edit**: `MixFormScreen.kt` + `MixFormViewModel` (mixId == null → add
   mode). Genre/Mood/Style fields now have brief helper text explaining what
   each means. Tracklist is a repeatable row editor.
@@ -401,9 +450,30 @@ models. Saved Mixes' backup format is unrelated/unchanged.
     this fast in the common case, since the station's image was almost
     always already loaded once elsewhere (e.g. a list/grid card) before
     it's played.
-  - **Mute bug**: intermittent, hard-to-reproduce reports of audio going
-    silent — often right as Android Auto connects — needing a manual
-    mute/unmute to recover. Root-caused via `adb shell dumpsys audio`:
+  - **Mute bug — ACTUALLY root-caused 2026-08-10: the app was never
+    requesting audio focus.** `ExoPlayer.Builder` had
+    `setHandleAudioBecomingNoisy(true)` but no
+    `setAudioAttributes(..., handleAudioFocus = true)` call at all, and
+    Media3 defaults that flag to **false** — so STATIC streamed audio
+    without ever holding focus. A phone mostly still makes noise that
+    way, which is why it survived this long unnoticed; a car does not,
+    because the head unit only opens its media channel for a stream that
+    has claimed media focus. Playback ran "successfully" into a channel
+    the car kept shut, and the car's own mute/unmute forced the amp to
+    re-open it — exactly the reported symptom. Fixed by declaring
+    `USAGE_MEDIA` / `AUDIO_CONTENT_TYPE_MUSIC` with
+    `handleAudioFocus = true`. **If AA ever plays silently again, check
+    this call still exists before investigating anything else.**
+    Everything below is the earlier, deeper investigation into the same
+    symptom; the watchdog it produced is kept (a genuinely stuck
+    suppression is still possible) but is no longer the primary defence,
+    and it now ignores `TRANSIENT_AUDIO_FOCUS_LOSS` — with real focus
+    handling in place that reason is legitimate ducking under a
+    navigation prompt, and forcing `play()` through it would talk over
+    the sat-nav.
+  - Earlier investigation, retained for context: intermittent reports of
+    audio going silent — often right as Android Auto connects — needing a
+    manual mute/unmute to recover. Root-caused via `adb shell dumpsys audio`:
     this app's `AudioTrack` gets created, muted, and has its routed
     device reassigned multiple times within about 12 seconds right as the
     car's audio device attaches, ending in a playback *suppression*
@@ -430,20 +500,32 @@ models. Saved Mixes' backup format is unrelated/unchanged.
       audio` as rapid `AudioTrack` create/pause/release cycling roughly
       every 1-2 seconds for the whole recovery window, not a single
       recovery attempt.
-  - **Stop playback on Android Auto disconnect**: two earlier attempts
-    didn't reliably work — pausing on `MediaSession.Callback.
-    onDisconnected` gated by the Android Auto package name
-    (`ANDROID_AUTO_PACKAGE = "com.google.android.projection.gearhead"`,
-    kept in place as a harmless extra layer), and ExoPlayer's built-in
-    `setHandleAudioBecomingNoisy(true)` (also kept). What actually works:
-    a directly-registered `AudioManager.AudioDeviceCallback`
+  - **Stop playback on Android Auto disconnect**: handled by a
+    directly-registered `AudioManager.AudioDeviceCallback`
     (`audioDeviceCallback`, registered after `mediaSession` exists to
-    avoid a theoretical init-order race) — `onAudioDevicesRemoved` pauses
-    playback whenever a removed device is a sink and isn't the phone's
-    own built-in speaker/earpiece. This is a direct OS-level audio
-    hardware signal, independent of Android Auto's specific session
-    protocol or of exactly when `ACTION_AUDIO_BECOMING_NOISY` does or
-    doesn't fire for a given device.
+    avoid a theoretical init-order race) — `onAudioDevicesRemoved`, plus
+    ExoPlayer's `setHandleAudioBecomingNoisy(true)` for headphones. This
+    is a direct OS-level audio hardware signal, independent of Android
+    Auto's session protocol or of when `ACTION_AUDIO_BECOMING_NOISY`
+    happens to fire. Two traps here, both of which bit us:
+    - The removal handler **debounces ~1.5s and rechecks the specific
+      removed devices by id**. Rechecking "is ANY external sink still
+      present?" instead is always true on a phone (telephony, paired
+      Bluetooth et al. live in the output list permanently), so it never
+      paused and playback carried on through the phone speaker after
+      unplugging. The debounce exists because the car's device is
+      reported removed-then-re-added during connect-time routing churn.
+    - **Pausing on `MediaSession.Callback.onDisconnected` gated by
+      `ANDROID_AUTO_PACKAGE` was actively harmful and has been removed**
+      (the callback now only logs). It was described here as a "harmless
+      extra layer"; it was not. Android Auto connects a *browse*
+      controller separately from the playback controller and drops it
+      during normal use — e.g. whenever you navigate from STATIC to Maps
+      — and every one of those routine disconnects hard-paused playback,
+      needing a manual tap on play. That was the long-standing "randomly
+      pauses itself" report. It also never achieved its stated purpose:
+      on a real unplug the session tears down without delivering the
+      callback at all. **Don't reintroduce it.**
 
 ## Features built
 - **Home**: top bar is a 3-way segmented button (List/Grid/Map) + Filter +
@@ -555,7 +637,12 @@ Token reference (light mode shown, dark mode swaps concrete/ink):
   box-shadow blur. **Uniform 1.0dp everywhere** (see "Features built").
 - Type: **IBM Plex Mono, single typeface, everywhere** (see "Features
   built" — this replaced the old 3-typeface Big Shoulders/Inter/IBM Plex
-  Mono system).
+  Mono system). **Any Material3 typography role not explicitly listed in
+  `StaticTypography` (`ui/theme/Type.kt`) silently falls back to Roboto** —
+  that's how "Tracklist" on the mix form, the Home empty-state heading and
+  a Settings section header all ended up in the wrong typeface until
+  `titleMedium`/`titleSmall` were added in 1.4. If a heading looks off,
+  add the role to `Type.kt` rather than overriding the individual `Text`.
 - Background grid: faint square grid (vertical-only for Mixes), now
   user-adjustable (spacing/line-width/opacity, Settings → Appearance,
   behind a Show/Hide toggle) and its first line is inset ~10dp from the
@@ -608,3 +695,24 @@ several more within this session alone (see "Features built").
 7. Grid-view genre bubbles are intentionally not shown (see "Features
    built" bubble section) — if the user ever asks for them back, remember
    the width/space trade-off that drove leaving them out.
+8. **Cast burst-buffer proxy — designed, deliberately not built for 1.4.**
+   The fix for the ~15s cast stall (see Chromecast section for the
+   root cause and measurements). Design: a **shadow fetch** — a second
+   lightweight connection to the currently-playing stream that fills a
+   ~512KB in-memory ring buffer, plus a small `ServerSocket` HTTP server
+   bound to the LAN interface. Casting then hands the receiver
+   `http://<phone-lan-ip>:<port>/…` instead of the origin URL, and the
+   accumulated backlog is written at LAN speed, clearing the receiver's
+   ~256KB appetite instantly.
+   - Deliberately a *shadow* fetch, NOT a proxy in front of the local
+     ExoPlayer path: local playback is the app's core working feature and
+     shouldn't gain a new failure mode to fix a cast-only problem.
+   - Cost: double bandwidth for the current station while the buffer runs.
+     Gate it on `castEnabled` (already off by default).
+   - Known limit: the backlog has to exist *before* you hit cast, so
+     casting from cold still stalls. Casting after ~15s of local listening
+     — the normal flow — is what this makes instant.
+   - Get the LAN IP by enumerating `NetworkInterface` (no permission
+     needed) rather than the deprecated `WifiManager`, and bind port 0 to
+     let the OS pick a free port. Cleartext to a local IP is already
+     allowed by `android:networkSecurityConfig`.

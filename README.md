@@ -17,13 +17,14 @@ bookmark SoundCloud/Mixcloud DJ mixes alongside them.
   favourites, popularity tiers, and live-broadcast time windows
 - **User-defined genre/mood/style tags** — not scraped from unreliable
   station metadata
-- **Saved Mixes**: bookmark SoundCloud/Mixcloud DJ sets with auto-fetched
-  title/artist/artwork, tracklists, and share-to-app support
+- **Saved Mixes**: bookmark SoundCloud/Mixcloud/YouTube DJ sets with
+  auto-fetched title/artist/artwork, tracklists, and share-to-app support
 - **Playback**: Media3/ExoPlayer with software auto-gain (internet radio
   streams carry no loudness metadata), a configurable buffer, and a
   persistent now-playing bar with live ICY metadata
 - **Sleep timer**, Android Auto support (browse and pick a station from
-  the car screen), and opt-in **Chromecast** support
+  the car screen, with previous/next/shuffle transport controls), and
+  opt-in **Chromecast** support
 - **Full-fidelity backup/restore** for both stations and mixes (own zip
   format), plus one-way import from Transistor collection exports
 - **Post-brutalist Material You** visual style — raw concrete tones, one
@@ -33,6 +34,23 @@ See [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md) for full architecture,
 data model, and build details.
 
 ## Changelog
+
+### v1.4
+- **Fixed Android Auto playing silently** — the app never actually requested
+  audio focus, so the car kept its media channel closed and playback ran
+  into silence until you hit mute/unmute on the head unit
+- Fixed playback pausing itself at random in the car — every time you
+  switched from STATIC to another screen (Maps, say), Android Auto dropped
+  a browse connection that the app was treating as "you've left the car"
+- Playback now genuinely stops when you unplug from Android Auto
+- **Saved Mixes: YouTube support** — YouTube and youtu.be links are
+  recognised as a source, get the YouTube badge, and auto-fill their
+  title/artist/artwork like SoundCloud and Mixcloud
+- Fixed Mixcloud mixes importing without their artwork (SoundCloud ones
+  were unaffected)
+- Fixed a handful of headings rendering in the wrong typeface
+- Casting now tells the receiver a stream's real audio format instead of
+  always claiming MP3, which was wrong for AAC/HE-AAC stations
 
 ### v1.3
 - **Android Auto**: added a Random Station entry to the browse list, and

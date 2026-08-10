@@ -32,3 +32,13 @@ fun MixcloudLogo(modifier: Modifier = Modifier, size: Dp = 28.dp) {
         modifier = modifier.size(size).clip(CircleShape)
     )
 }
+
+@Composable
+fun YouTubeLogo(modifier: Modifier = Modifier, size: Dp = 28.dp) {
+    Image(
+        painter = painterResource(R.drawable.youtube_logo),
+        contentDescription = "YouTube",
+        contentScale = ContentScale.Crop,
+        modifier = modifier.size(size).clip(CircleShape)
+    )
+}

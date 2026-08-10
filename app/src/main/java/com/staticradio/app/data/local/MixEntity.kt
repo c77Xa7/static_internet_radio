@@ -3,10 +3,12 @@ package com.staticradio.app.data.local
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
-enum class MixSource { SOUNDCLOUD, MIXCLOUD, OTHER }
+// Room stores enums by name (no TypeConverter involved), so adding a constant
+// here is schema-compatible — no @Database version bump, no data wipe.
+enum class MixSource { SOUNDCLOUD, MIXCLOUD, YOUTUBE, OTHER }
 
 /**
- * Saved DJ mix bookmark (SoundCloud/Mixcloud). Everything here is always
+ * Saved DJ mix bookmark (SoundCloud/Mixcloud/YouTube). Everything here is always
  * user-defined — genre/mood/style are single values picked from the same
  * Settings-managed vocabularies stations use (see TagType), not multi-tag
  * "smart tags" like a station's genre field.

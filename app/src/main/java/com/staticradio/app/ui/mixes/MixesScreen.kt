@@ -207,6 +207,7 @@ private fun SourceBadge(source: MixSource) {
     when (source) {
         MixSource.SOUNDCLOUD -> SoundCloudLogo()
         MixSource.MIXCLOUD -> MixcloudLogo()
+        MixSource.YOUTUBE -> YouTubeLogo()
         MixSource.OTHER -> Box(
             modifier = Modifier
                 .size(28.dp)
