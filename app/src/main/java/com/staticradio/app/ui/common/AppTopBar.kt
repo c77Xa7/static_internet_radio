@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -53,6 +54,8 @@ fun AppTopBar(
     onMixesClick: () -> Unit,
     onFilterClick: () -> Unit,
     filterActive: Boolean,
+    onSearchClick: (() -> Unit)? = null,
+    searchActive: Boolean = false,
     onAddClick: () -> Unit,
     onSettingsClick: () -> Unit,
     subtitle: String? = null,
@@ -111,8 +114,29 @@ fun AppTopBar(
                         )
                         Spacer(Modifier.width(8.dp))
                     }
-                    TopBarIconButton(active = filterActive, onClick = onFilterClick) { tint ->
-                        Icon(Icons.Filled.FilterList, contentDescription = "Filter", tint = tint)
+                    if (onSearchClick != null) {
+                        // Filter + Search share one segmented group, divided by
+                        // a vertical keyline — same construction as the
+                        // list/grid/map ViewModeSegment.
+                        val keyline = MaterialTheme.colorScheme.outline
+                        Row(
+                            modifier = Modifier
+                                .height(40.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .border(1.0.dp, keyline, RoundedCornerShape(10.dp))
+                        ) {
+                            SegmentHalf(active = filterActive, onClick = onFilterClick) { tint ->
+                                Icon(Icons.Filled.FilterList, contentDescription = "Filter", tint = tint)
+                            }
+                            SegmentDivider(keyline)
+                            SegmentHalf(active = searchActive, onClick = onSearchClick) { tint ->
+                                Icon(Icons.Filled.Search, contentDescription = "Search", tint = tint)
+                            }
+                        }
+                    } else {
+                        TopBarIconButton(active = filterActive, onClick = onFilterClick) { tint ->
+                            Icon(Icons.Filled.FilterList, contentDescription = "Filter", tint = tint)
+                        }
                     }
                     if (mode != TopBarMode.MIXES) {
                         Spacer(Modifier.width(8.dp))

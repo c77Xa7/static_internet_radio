@@ -36,6 +36,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.staticradio.app.data.StationLiveWindow
 import com.staticradio.app.ui.common.LiveLed
 
 private const val MAX_VISIBLE_GENRE_BUBBLES = 3
@@ -208,9 +209,20 @@ fun StationListRow(
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     isLive: Boolean = false,
+    userZone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
     modifier: Modifier = Modifier
 ) {
     val station = item.station
+    // Badge appears when the user defined broadcast hours OR set 24/7 —
+    // a 24/7 station is by definition always Online, and showing the green
+    // badge makes that state visible rather than silent.
+    val hasDefinedTimes = station.is24x7 || StationLiveWindow.hasDefinedTimes(
+        station.liveTimesFrom, station.liveTimesTo, station.is24x7
+    )
+    val isOnline = StationLiveWindow.isOnline(
+        station.liveTimesFrom, station.liveTimesTo, station.is24x7,
+        station.countryCode, userZone
+    )
     StationPlate(
         popularityEmoji = station.popularityTier,
         mood = station.mood,
@@ -258,6 +270,21 @@ fun StationListRow(
                         maxLines = 1
                     )
                 }
+                if (hasDefinedTimes) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(top = 3.dp)
+                    ) {
+                        StatusDot(online = isOnline)
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            text = if (isOnline) "ONLINE" else "OFFLINE",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isOnline) MaterialTheme.colorScheme.onSurfaceVariant
+                            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        )
+                    }
+                }
             }
             val context = LocalContext.current
             val homepageUrl = station.websiteUrl
@@ -277,6 +304,24 @@ fun StationListRow(
             }
         }
     }
+}
+
+/**
+ * Small static status light next to the ONLINE/OFFLINE text — green when the
+ * station's broadcast window is open, red when it isn't. Static (no pulse)
+ * on purpose: unlike the LiveLed (which pulses only for the station actually
+ * playing), this one is a plain state indicator present on every card.
+ */
+@Composable
+fun StatusDot(online: Boolean, size: Dp = 7.dp, modifier: Modifier = Modifier) {
+    val color = if (online) Color(0xFF2E9E44) else Color(0xFFC4351B)
+    Box(
+        modifier = modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(color)
+            .border(0.5.dp, MaterialTheme.colorScheme.outline, CircleShape)
+    )
 }
 
 @Composable

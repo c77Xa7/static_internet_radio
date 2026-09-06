@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -85,6 +86,8 @@ fun SettingsScreen(
     onManageGenres: () -> Unit,
     onManageMoods: () -> Unit,
     onManageStyles: () -> Unit,
+    onReorderStations: () -> Unit = {},
+    onReorderMixes: () -> Unit = {},
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -106,6 +109,9 @@ fun SettingsScreen(
     val gridOpacity by viewModel.gridOpacity.collectAsState()
     val bufferSeconds by viewModel.bufferSeconds.collectAsState()
     val castEnabled by viewModel.castEnabled.collectAsState()
+    val castPreBuffer by viewModel.castPreBuffer.collectAsState()
+    val timeZoneId by viewModel.timeZoneId.collectAsState()
+    val defaultDestination by viewModel.defaultDestination.collectAsState()
     val moodVocabulary by stationDao.observeTagsByType(com.staticradio.app.data.local.TagType.MOOD).collectAsState(initial = emptyList())
     val styleVocabulary by stationDao.observeTagsByType(com.staticradio.app.data.local.TagType.STYLE).collectAsState(initial = emptyList())
 
@@ -241,8 +247,7 @@ fun SettingsScreen(
             Text(
                 "Smooths out loud/quiet stations in real time by measuring the signal and slowly adjusting gain toward a consistent level — there's no loudness data in internet radio streams to read, so this listens and adapts instead.",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(bottom = 8.dp)
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             SettingsRow(label = "Stream buffer: ${bufferSeconds}s") {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -267,6 +272,62 @@ fun SettingsScreen(
             }
             Text(
                 "Adds a cast button to the player bar for streaming to a Chromecast device on your network. Off by default — enabling this is the only thing in the app that touches Google Play Services.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            SettingsRow(label = "Pre-buffer for casting") {
+                Switch(
+                    checked = castPreBuffer,
+                    onCheckedChange = viewModel::setCastPreBuffer
+                )
+            }
+            Text(
+                "Warns: uses more data. Keeps a ready-made buffer of the next 3 stations (the ones 'Next' would play) and the next 3 random stations (the ones 'Shuffle' would play) — so casting to a Chromecast starts instantly instead of stalling ~15 seconds while the receiver fills up. Uses extra data: each upcoming station is fetched a second time in the background alongside whatever you're listening to.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        // ---- Region & time ----
+        SettingsCategory(title = "Region & time") {
+            SettingsRow(label = "Time zone") {
+                TimeZonePicker(
+                    selectedZoneId = timeZoneId,
+                    onSelect = viewModel::setTimeZoneId
+                )
+            }
+            Text(
+                "Used to work out whether a station's defined broadcast hours mean it's currently Online or Offline — the app converts the station's hours from its own country's clock into yours. Leave on \"Device default\" unless you live somewhere your phone doesn't.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        // ---- Ordering ----
+        SettingsCategory(title = "Ordering") {
+            SettingsRow(label = "Reorder stations") {
+                OutlinedButton(onClick = onReorderStations) { Text("Open") }
+            }
+            Text(
+                "Favourites stay pinned as their own top section — you can reorder within favourites, and within everything else below them.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            SettingsRow(label = "Reorder mixes") {
+                OutlinedButton(onClick = onReorderMixes) { Text("Open") }
+            }
+        }
+
+        // ---- Startup ----
+        SettingsCategory(title = "Startup") {
+            SettingsRow(label = "Open on") {
+                DefaultDestinationDropdown(
+                    selected = defaultDestination,
+                    onSelect = viewModel::setDefaultDestination
+                )
+            }
+            Text(
+                "Which screen the app opens on: the station list, the station grid, the station map, or your saved mixes.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -298,14 +359,12 @@ fun SettingsScreen(
         SettingsCategory(title = "Backup") {
             Text(
                 "Radio stations",
-                style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.padding(bottom = 4.dp)
+                style = MaterialTheme.typography.labelLarge
             )
             Text(
                 "Backs up every station field — genre/mood/style, coordinates, description, language, popularity — plus your full Genre/Mood/Style vocabularies. A Transistor export can still be imported directly, but Transistor's format doesn't carry those extra fields.",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(bottom = 8.dp)
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = {
@@ -318,14 +377,12 @@ fun SettingsScreen(
             }
             Text(
                 "Saved mixes",
-                style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.padding(top = 16.dp, bottom = 4.dp)
+                style = MaterialTheme.typography.labelLarge
             )
             Text(
                 "STATIC's own zip format — export bundles the tracklist and any locally-uploaded images.",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(bottom = 8.dp)
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = {
@@ -368,9 +425,13 @@ private fun SettingsCategory(title: String, content: @Composable () -> Unit) {
                 .clip(RoundedCornerShape(14.dp))
                 .background(MaterialTheme.colorScheme.surface)
                 .border(1.0.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(14.dp))
-                .padding(horizontal = 14.dp, vertical = 6.dp)
+                .padding(horizontal = 14.dp, vertical = 10.dp)
         ) {
-            Column { content() }
+            // Uniform vertical rhythm inside every category card: rows and
+            // helper texts contribute no external padding of their own — the
+            // Card's internal Column enforces the spacing, so no section can
+            // end up visually denser or airier than another.
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) { content() }
         }
     }
 }
@@ -385,7 +446,7 @@ private fun GridCustomizationControls(
     onOpacityChange: (Float) -> Unit,
     onReset: () -> Unit
 ) {
-    Column(modifier = Modifier.padding(bottom = 12.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Grid spacing: ${spacing.toInt()}dp", style = MaterialTheme.typography.labelMedium)
         Slider(value = spacing, onValueChange = onSpacingChange, valueRange = 12f..64f)
 
@@ -395,7 +456,7 @@ private fun GridCustomizationControls(
         Text("Grid opacity: ${(opacity * 100).toInt()}%", style = MaterialTheme.typography.labelMedium)
         Slider(value = opacity, onValueChange = onOpacityChange, valueRange = 0f..1f)
 
-        OutlinedButton(onClick = onReset, modifier = Modifier.padding(top = 4.dp)) { Text("Reset to default") }
+        OutlinedButton(onClick = onReset) { Text("Reset to default") }
     }
 }
 
@@ -551,5 +612,134 @@ private fun OptionButton(label: String, active: Boolean, onClick: () -> Unit) {
             .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
         Text(label, style = MaterialTheme.typography.labelMedium)
+    }
+}
+
+@Composable
+private fun DefaultDestinationDropdown(
+    selected: com.staticradio.app.data.settings.DefaultDestination,
+    onSelect: (com.staticradio.app.data.settings.DefaultDestination) -> Unit
+) {
+    var expanded by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    val keyline = MaterialTheme.colorScheme.outline
+    val labels = mapOf(
+        com.staticradio.app.data.settings.DefaultDestination.STATION_LIST to "Station list",
+        com.staticradio.app.data.settings.DefaultDestination.STATION_GRID to "Station grid",
+        com.staticradio.app.data.settings.DefaultDestination.STATION_MAP to "Station map",
+        com.staticradio.app.data.settings.DefaultDestination.MIXES to "Mixes"
+    )
+    Box {
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .border(1.0.dp, keyline, RoundedCornerShape(8.dp))
+                .clickable { expanded = true }
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(labels[selected] ?: selected.name, style = MaterialTheme.typography.labelMedium)
+            Icon(Icons.Filled.ArrowDropDown, contentDescription = null, modifier = Modifier.padding(start = 4.dp))
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            com.staticradio.app.data.settings.DefaultDestination.entries.forEach { dest ->
+                DropdownMenuItem(
+                    text = { Text(labels[dest] ?: dest.name) },
+                    onClick = { onSelect(dest); expanded = false }
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Searchable IANA time zone picker. Every JDK-known zone id with its current
+ * UTC offset, filtered by a query box — there are ~600, so search is the
+ * primary interaction (same pattern as the country picker).
+ *
+ * Deliberately an AlertDialog, not a DropdownMenu: a LazyColumn nested inside
+ * DropdownMenu's own scrollable content column gets measured with infinite
+ * height and crashes — the dropdown crashed on open every time.
+ */
+@Composable
+private fun TimeZonePicker(selectedZoneId: String, onSelect: (String) -> Unit) {
+    var expanded by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    var query by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf("") }
+    val keyline = MaterialTheme.colorScheme.outline
+
+    val allZones = remember {
+        java.time.ZoneId.getAvailableZoneIds().map { id ->
+            val offset = java.time.ZoneId.of(id).rules.getOffset(java.time.Instant.now()).toString()
+            id to offset
+        }.sortedBy { it.first }
+    }
+
+    Box {
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .border(1.0.dp, keyline, RoundedCornerShape(8.dp))
+                .clickable { expanded = true; query = "" }
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                if (selectedZoneId.isBlank()) "Device default" else selectedZoneId,
+                style = MaterialTheme.typography.labelMedium
+            )
+            Icon(Icons.Filled.ArrowDropDown, contentDescription = null, modifier = Modifier.padding(start = 4.dp))
+        }
+        if (expanded) {
+            AlertDialog(
+                onDismissRequest = { expanded = false },
+                containerColor = MaterialTheme.colorScheme.surface,
+                titleContentColor = MaterialTheme.colorScheme.onSurface,
+                textContentColor = MaterialTheme.colorScheme.onSurface,
+                title = { Text("Time zone") },
+                text = {
+                    Column {
+                        androidx.compose.material3.OutlinedTextField(
+                            value = query,
+                            onValueChange = { query = it },
+                            placeholder = { Text("Search time zones", style = MaterialTheme.typography.labelMedium) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                        )
+                        // Bounded height: the list scrolls inside its own box,
+                        // never inheriting the dialog's constraints.
+                        val filtered = remember(query) {
+                            if (query.isBlank()) allZones
+                            else allZones.filter { it.first.contains(query.trim(), ignoreCase = true) }.take(120)
+                        }
+                        androidx.compose.foundation.lazy.LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                            items(filtered.size) { index ->
+                                val (id, offset) = filtered[index]
+                                androidx.compose.material3.DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text(id, style = MaterialTheme.typography.labelMedium)
+                                            Text(
+                                                "UTC$offset",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    },
+                                    trailingIcon = {
+                                        if (id == selectedZoneId) Text("✓", color = MaterialTheme.colorScheme.primary)
+                                    },
+                                    onClick = {
+                                        onSelect(id)
+                                        expanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = { expanded = false }) { Text("Cancel") }
+                }
+            )
+        }
     }
 }

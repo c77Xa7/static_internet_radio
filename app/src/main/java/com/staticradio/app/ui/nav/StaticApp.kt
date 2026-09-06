@@ -42,7 +42,10 @@ import com.staticradio.app.ui.mixes.MixesScreen
 import com.staticradio.app.ui.player.PersistentPlayerBar
 import com.staticradio.app.ui.player.PlayerViewModel
 import com.staticradio.app.ui.settings.GenreVocabularyScreen
+import com.staticradio.app.ui.settings.ReorderKind
+import com.staticradio.app.ui.settings.ReorderScreen
 import com.staticradio.app.ui.settings.SettingsScreen
+import com.staticradio.app.ui.settings.SettingsViewModel
 import com.staticradio.app.ui.settings.TagVocabularyScreen
 import com.staticradio.app.ui.theme.toComposeShape
 
@@ -63,6 +66,8 @@ private sealed class Destination(val route: String) {
     data object EditMix : Destination("edit_mix/{mixId}") {
         fun createRoute(mixId: String) = "edit_mix/$mixId"
     }
+    data object ReorderStations : Destination("reorder_stations")
+    data object ReorderMixes : Destination("reorder_mixes")
 }
 
 /**
@@ -114,6 +119,29 @@ fun StaticApp(stationDao: StationDao, sharedMixUrl: String? = null) {
     val gridOpacity by app.settingsRepository.gridOpacity.collectAsState(initial = com.staticradio.app.data.settings.DEFAULT_GRID_OPACITY)
     val castEnabled by app.settingsRepository.castEnabled.collectAsState(initial = false)
 
+    // Startup destination: the app always routes through Home (it owns the
+    // shared HomeViewModel and the top bar), so the "open on" setting decides
+    // whether we immediately push the chosen screen once, at first launch.
+    val defaultDestination by app.settingsRepository.defaultDestination.collectAsState(
+        initial = com.staticradio.app.data.settings.DefaultDestination.STATION_LIST
+    )
+    var startupHandled by remember { mutableStateOf(false) }
+    LaunchedEffect(defaultDestination, startupHandled) {
+        if (!startupHandled) {
+            startupHandled = true
+            when (defaultDestination) {
+                // STATION_LIST / STATION_GRID are Home's own view modes —
+                // HomeScreen applies them directly (see initialViewMode).
+                // Map and Mixes are separate pushed destinations.
+                com.staticradio.app.data.settings.DefaultDestination.STATION_MAP ->
+                    navController.navigate(Destination.Map.route)
+                com.staticradio.app.data.settings.DefaultDestination.MIXES ->
+                    navController.navigate(Destination.Mixes.route)
+                else -> {}
+            }
+        }
+    }
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background
     ) { innerPadding ->
@@ -151,7 +179,11 @@ fun StaticApp(stationDao: StationDao, sharedMixUrl: String? = null) {
                             showBackgroundGrid = showBackgroundGrid,
                             gridSpacing = gridSpacingDp.dp,
                             gridLineWidth = gridLineWidthDp.dp,
-                            gridOpacity = gridOpacity
+                            gridOpacity = gridOpacity,
+                            initialViewMode = when (defaultDestination) {
+                                com.staticradio.app.data.settings.DefaultDestination.STATION_GRID -> StationViewMode.GRID
+                                else -> StationViewMode.LIST
+                            }
                         )
                     }
                     composable(Destination.Map.route) {
@@ -196,6 +228,8 @@ fun StaticApp(stationDao: StationDao, sharedMixUrl: String? = null) {
                             onManageGenres = { navController.navigate(Destination.GenreVocabulary.route) },
                             onManageMoods = { navController.navigate(Destination.MoodVocabulary.route) },
                             onManageStyles = { navController.navigate(Destination.StyleVocabulary.route) },
+                            onReorderStations = { navController.navigate(Destination.ReorderStations.route) },
+                            onReorderMixes = { navController.navigate(Destination.ReorderMixes.route) },
                             onBack = { navController.popBackStack() }
                         )
                     }
@@ -298,6 +332,30 @@ fun StaticApp(stationDao: StationDao, sharedMixUrl: String? = null) {
                                 navController.popBackStack()
                             },
                             onBack = { navController.popBackStack() }
+                        )
+                    }
+                    composable(Destination.ReorderStations.route) {
+                        ReorderScreen(
+                            kind = ReorderKind.STATIONS,
+                            onBack = { navController.popBackStack() },
+                            viewModel = viewModel(
+                                factory = SettingsViewModel.Factory(
+                                    app.settingsRepository, stationDao, mixDao,
+                                    app.radioController, app.playbackRepository
+                                )
+                            )
+                        )
+                    }
+                    composable(Destination.ReorderMixes.route) {
+                        ReorderScreen(
+                            kind = ReorderKind.MIXES,
+                            onBack = { navController.popBackStack() },
+                            viewModel = viewModel(
+                                factory = SettingsViewModel.Factory(
+                                    app.settingsRepository, stationDao, mixDao,
+                                    app.radioController, app.playbackRepository
+                                )
+                            )
                         )
                     }
                 }

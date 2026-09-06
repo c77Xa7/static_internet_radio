@@ -87,23 +87,19 @@ private fun lightModeMapFilter(inkColor: Int, concreteColor: Int): ColorMatrixCo
 
 private val PIN_PALETTE = listOf(0xFF1D1C18, 0xFF3D6BFF, 0xFFCFEE2E, 0xFFB7AE99, 0xFFFF4713).map { it.toInt() }
 
-// CARTO's Voyager style — free, no API key, OSM data underneath (same source
-// as stock Mapnik) via CARTO's own cartography, which leans more Latin/English
-// in its place labels than stock Mapnik does for many non-Latin-script
-// regions. Not a hard guarantee of English-only labels everywhere — that was
-// Wikimedia's "osm-intl" tile set, which now 403s on external requests
-// (confirmed dead, not just flaky) — but this is the closest reliable, free,
-// no-auth option available.
-private val ENGLISH_LEANING_TILE_SOURCE = XYTileSource(
-    "CartoVoyager",
+// Standard OpenStreetMap tile source — no API key, no watermark. Previously
+// CARTO's Voyager raster tiles, but CARTO began requiring API keys for
+// anonymous raster requests (free per-user keys, but not something to bake
+// into an app), watermarking every tile with "API key required". Same OSM
+// data underneath; Mapnik's place labels lean more local-language than
+// CARTO's did in some regions, but the map is reliable and watermark-free.
+private val OSM_TILE_SOURCE = XYTileSource(
+    "OpenStreetMap",
     0, 19,
     256,
     ".png",
     arrayOf(
-        "https://a.basemaps.cartocdn.com/rastertiles/voyager/",
-        "https://b.basemaps.cartocdn.com/rastertiles/voyager/",
-        "https://c.basemaps.cartocdn.com/rastertiles/voyager/",
-        "https://d.basemaps.cartocdn.com/rastertiles/voyager/"
+        "https://tile.openstreetmap.org/"
     )
 )
 
@@ -145,7 +141,9 @@ fun MapScreen(
     }.collectAsState(initial = emptyList())
 
     var showFilterDialog by remember { mutableStateOf(false) }
+    var showSearchBar by remember { mutableStateOf(false) }
     val filter = homeViewModel?.filter?.collectAsState()?.value
+    val nameSearch = homeViewModel?.nameSearch?.collectAsState()?.value ?: ""
     val genres = homeViewModel?.genres?.collectAsState()?.value ?: emptyList()
     val countryCodes = homeViewModel?.countryCodes?.collectAsState()?.value ?: emptyList()
     val moods = homeViewModel?.moods?.collectAsState()?.value ?: emptyList()
@@ -179,7 +177,11 @@ fun MapScreen(
             .filter { !filter.favoritesOnly || it.isFavorite }
     } else {
         allStations
-    }).filter { it.latitude != null && it.longitude != null }
+    })
+        // Name search composes with attribute filters (shared HomeViewModel
+        // state — same query drives List/Grid/Map).
+        .filter { nameSearch.isBlank() || it.name.contains(nameSearch.trim(), ignoreCase = true) }
+        .filter { it.latitude != null && it.longitude != null }
 
     val accentColor = MaterialTheme.colorScheme.primary.toArgb()
     val keylineColor = MaterialTheme.colorScheme.outline.toArgb()
@@ -219,9 +221,23 @@ fun MapScreen(
                 onMixesClick = onMixesClick,
                 onFilterClick = { showFilterDialog = true },
                 filterActive = filterActive,
+                onSearchClick = if (homeViewModel != null) {
+                    {
+                        showSearchBar = !showSearchBar
+                        if (!showSearchBar) homeViewModel.setNameSearch("")
+                    }
+                } else null,
+                searchActive = showSearchBar,
                 onAddClick = onAddClick,
                 onSettingsClick = onSettingsClick
             )
+            if (showSearchBar && homeViewModel != null) {
+                com.staticradio.app.ui.common.NameSearchBar(
+                    query = nameSearch,
+                    onQueryChange = homeViewModel::setNameSearch,
+                    placeholder = "Search stations by name"
+                )
+            }
         }
         Box(modifier = Modifier.weight(1f).clipToBounds()) {
         AndroidView(
@@ -243,7 +259,7 @@ fun MapScreen(
                     // scrollable area to the real Mercator bounds is what actually stops the
                     // map duplicating above/below the visible area at low zoom.
                     layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-                    setTileSource(ENGLISH_LEANING_TILE_SOURCE)
+                    setTileSource(OSM_TILE_SOURCE)
                     setMultiTouchControls(true)
                     // Osmdroid's built-in zoom buttons are plain square Android widgets we
                     // can't restyle — hidden in favor of the circular Compose ones below.

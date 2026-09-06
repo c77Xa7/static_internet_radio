@@ -23,13 +23,31 @@ data class HomeFilter(
     val favoritesOnly: Boolean = false
 )
 
-class HomeViewModel(private val stationDao: StationDao) : ViewModel() {
+class HomeViewModel(
+    private val stationDao: StationDao,
+    private val settingsRepository: com.staticradio.app.data.settings.SettingsRepository? = null
+) : ViewModel() {
 
     private val _viewMode = MutableStateFlow(StationViewMode.LIST)
     val viewMode: StateFlow<StationViewMode> = _viewMode
 
     private val _filter = MutableStateFlow(HomeFilter())
     val filter: StateFlow<HomeFilter> = _filter
+
+    // User's saved reorder (Settings -> Ordering) — empty until they've used
+    // the reorder screen at least once.
+    private val savedOrder = settingsRepository?.stationOrder
+        ?: kotlinx.coroutines.flow.MutableStateFlow(emptyList())
+
+    // Free-text search over the station NAME (top bar magnifier) — separate
+    // from the Filter dialog, which filters by attributes. Substring,
+    // case-insensitive; blank means no search.
+    private val _nameSearch = MutableStateFlow("")
+    val nameSearch: StateFlow<String> = _nameSearch
+
+    fun setNameSearch(query: String) {
+        _nameSearch.value = query
+    }
 
     private val allStations = stationDao.observeStationsWithTags()
         .map { rows -> rows.map { it.toResolved() } }
@@ -50,16 +68,30 @@ class HomeViewModel(private val stationDao: StationDao) : ViewModel() {
         .map { stations -> stations.mapNotNull { it.style }.distinct().sorted() }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val stations: StateFlow<List<StationListItem>> = combine(allStations, _filter) { stations, filter ->
+    val stations: StateFlow<List<StationListItem>> = combine(
+        allStations, _filter, savedOrder, _nameSearch
+    ) { stations, filter, order, search ->
         stations
             .filter { filter.genre == null || filter.genre in it.genres }
             .filter { filter.countryCode == null || it.countryCode == filter.countryCode }
             .filter { filter.mood == null || it.mood == filter.mood }
             .filter { filter.style == null || it.style == filter.style }
             .filter { !filter.favoritesOnly || it.isFavorite }
-            // Favourites float to the top, alphabetical among themselves; everyone
-            // else keeps the underlying (most-recently-added-first) order.
-            .sortedWith(compareByDescending<ResolvedStation> { it.isFavorite }.thenBy { if (it.isFavorite) it.name.lowercase() else "" })
+            .filter { search.isBlank() || it.name.contains(search.trim(), ignoreCase = true) }
+            // Favourites float to the top as their own block; within each
+            // block, the user's saved reorder order wins (Settings ->
+            // Ordering -> Reorder stations), falling back to alphabetical
+            // (favourites) / most-recently-added-first (the rest) for
+            // anything not in the saved list.
+            .let { list ->
+                val rank = order.withIndex().associate { (i, id) -> id to i }
+                list.sortedWith(
+                    compareByDescending<ResolvedStation> { it.isFavorite }
+                        .thenBy { rank[it.id] ?: Int.MAX_VALUE }
+                        .thenBy { if (it.isFavorite) it.name.lowercase() else "" }
+                        .thenByDescending { it.id } // stable-ish fallback for unsaved ties
+                )
+            }
             .map { StationListItem(it) }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -87,10 +119,13 @@ class HomeViewModel(private val stationDao: StationDao) : ViewModel() {
         _filter.value = _filter.value.copy(favoritesOnly = !_filter.value.favoritesOnly)
     }
 
-    class Factory(private val stationDao: StationDao) : ViewModelProvider.Factory {
+    class Factory(
+        private val stationDao: StationDao,
+        private val settingsRepository: com.staticradio.app.data.settings.SettingsRepository? = null
+    ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
-            HomeViewModel(stationDao) as T
+            HomeViewModel(stationDao, settingsRepository) as T
     }
 }
 

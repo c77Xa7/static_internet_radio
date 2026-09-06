@@ -102,6 +102,17 @@ class RadioPlaybackService : MediaLibraryService() {
     private var castContext: CastContext? = null
     private var castPlayer: CastPlayer? = null
 
+    // Burst-buffer shadow proxy (PROJECT_CONTEXT.md "Known gaps" item 8) —
+    // opt-in via Settings -> Cast -> Pre-buffer. Warms upcoming stations so a
+    // Chromecast receiver's ~256KB appetite clears at LAN speed. Never touches
+    // the local playback path.
+    private val burstBufferProxy = BurstBufferProxy(serviceScope)
+    private var preBufferEnabled = false
+
+    // The user's chosen time zone (Settings -> Time zone), used by the
+    // Online/Offline logic. Refreshed from DataStore by the collector below.
+    @Volatile private var userZoneId: java.time.ZoneId = java.time.ZoneId.systemDefault()
+
     // Updated whenever we explicitly ask the player to start (playStation,
     // switchToCast, togglePlayPause-to-play) — bounds the suppression
     // watchdog (see onPlaybackSuppressionReasonChanged) to shortly after a
@@ -245,6 +256,27 @@ class RadioPlaybackService : MediaLibraryService() {
             }
         }
 
+        serviceScope.launch {
+            app.settingsRepository.timeZoneId.collect { id ->
+                userZoneId = if (id.isBlank()) java.time.ZoneId.systemDefault()
+                else runCatching { java.time.ZoneId.of(id) }.getOrDefault(java.time.ZoneId.systemDefault())
+            }
+        }
+
+        // Pre-buffer toggle also drives the proxy server's lifecycle — it
+        // should hold no sockets and no threads when switched off.
+        serviceScope.launch {
+            app.settingsRepository.castPreBuffer.collect { enabled ->
+                preBufferEnabled = enabled
+                if (enabled) {
+                    burstBufferProxy.start()
+                    refreshPreBuffers()
+                } else {
+                    burstBufferProxy.stop()
+                }
+            }
+        }
+
         // Custom launch intent so tapping the notification opens your app,
         // not a default system screen.
         val sessionActivityIntent = PendingIntent.getActivity(
@@ -302,6 +334,7 @@ class RadioPlaybackService : MediaLibraryService() {
 
     override fun onDestroy() {
         (getSystemService(AUDIO_SERVICE) as AudioManager).unregisterAudioDeviceCallback(audioDeviceCallback)
+        burstBufferProxy.stop()
         disableCastSupport()
         mediaSession.run {
             player.release()
@@ -403,6 +436,18 @@ class RadioPlaybackService : MediaLibraryService() {
         repository.updateCurrentStation(stationId)
         repository.updateError(null)
 
+        // Consume the pre-decided shuffle queue entry for this station (it's
+        // now "used") and re-warm the buffers for whatever's next. Both are
+        // no-ops unless pre-buffering is on.
+        serviceScope.launch {
+            if (preBufferEnabled) {
+                val app = application as StaticRadioApp
+                val queue = app.settingsRepository.shuffleQueue.first().filter { it != stationId }
+                app.settingsRepository.setShuffleQueue(queue)
+            }
+            refreshPreBuffers()
+        }
+
         // Artwork bytes are resolved *before* the item is ever handed to the
         // player, not patched in afterwards — an earlier attempt embedded
         // artwork asynchronously post-play (via replaceMediaItem once
@@ -420,7 +465,11 @@ class RadioPlaybackService : MediaLibraryService() {
             // active) so picking a new station from the app also redirects
             // an active cast.
             val target = mediaSession.player
-            val item = buildPlayableMediaItem(stationId, streamUrl, title, imageUrl, artworkBytes)
+            // When casting with pre-buffering on, hand the receiver this
+            // phone's LAN proxy URL (warm ring buffer at LAN speed) instead
+            // of the origin (which may feed at 1x realtime — the ~15s stall).
+            val receiverUrl = castUrlFor(streamUrl)
+            val item = buildPlayableMediaItem(stationId, receiverUrl, title, imageUrl, artworkBytes)
             // mediaSession.player is always wrapped in StationSkippingPlayer now,
             // so it's never literally `is CastPlayer` — castPlayer's nullness is
             // the actual signal for "currently routing to cast".
@@ -615,7 +664,27 @@ class RadioPlaybackService : MediaLibraryService() {
     fun playRandomStation() {
         val lookup = stationLookup ?: return
         serviceScope.launch {
-            val random = lookup.getRandomStation(excludeId = repository.currentStationId.value)
+            val app = application as StaticRadioApp
+            // With pre-buffering on, the random pick comes from the
+            // pre-decided queue (already warm in the proxy) rather than a
+            // fresh roll — that's the entire point of pre-deciding it.
+            if (preBufferEnabled) {
+                ensureShuffleQueue()
+                val queue = app.settingsRepository.shuffleQueue.first()
+                val nextId = queue.firstOrNull()
+                val station = nextId?.let { lookup.getStation(it) }
+                if (station != null) {
+                    playStation(station.id, station.streamUrl, station.title, station.imageUrl)
+                    return@launch
+                }
+                // Queue was empty/unservable — fall through to a fresh roll.
+            }
+            // Online stations only — an Offline station with defined hours is
+            // skipped by shuffle (and by next/previous), per the feature spec.
+            val candidates = lookup.getAllStations().filter { it.isOnlineAt(userZoneId) }
+            val excluded = repository.currentStationId.value
+            val random = candidates.filter { it.id != excluded }.randomOrNull()
+                ?: candidates.randomOrNull() // single-station edge case: allow repeating
             random?.let { playStation(it.id, it.streamUrl, it.title, it.imageUrl) }
         }
     }
@@ -626,18 +695,100 @@ class RadioPlaybackService : MediaLibraryService() {
     // Treats the same favourites-first-then-alphabetical order used by the
     // Android Auto browse tree (StationLookup.getAllStations()) as a virtual
     // playlist for previous/next, since stations aren't a real ExoPlayer
-    // multi-item playlist. Wraps around at either end.
+    // multi-item playlist. Wraps around at either end. Offline stations
+    // (user-defined live hours currently outside the window) are skipped.
     private fun playAdjacentStation(offset: Int) {
         val lookup = stationLookup ?: return
         serviceScope.launch {
-            val stations = lookup.getAllStations()
-            if (stations.isEmpty()) return@launch
-            val currentIndex = stations.indexOfFirst { it.id == repository.currentStationId.value }
-            val nextIndex = if (currentIndex == -1) 0 else (currentIndex + offset).mod(stations.size)
-            val next = stations[nextIndex]
+            val online = lookup.getAllStations().filter { it.isOnlineAt(userZoneId) }
+            if (online.isEmpty()) return@launch
+            val currentIndex = online.indexOfFirst { it.id == repository.currentStationId.value }
+            // -1 (nothing playing) still lands sensibly: index 0 walking forward.
+            val nextIndex = if (currentIndex == -1) {
+                if (offset > 0) 0 else online.size - 1
+            } else (currentIndex + offset).mod(online.size)
+            val next = online[nextIndex]
             playStation(next.id, next.streamUrl, next.title, next.imageUrl)
         }
     }
+
+    // ---- Pre-buffering (burst-buffer shadow proxy) ----
+
+    /**
+     * Warms the streams the user is statistically about to ask for:
+     *  - the next 3 playlist stations (Next button direction)
+     *  - the 3-entry random queue backing Shuffle (pre-decided, persisted in
+     *    DataStore, recomputed when exhausted — so the proxy can warm it
+     *    *before* the button is ever pressed)
+     *
+     * Only when the pre-buffer setting is on; a no-op otherwise.
+     */
+    private fun refreshPreBuffers() {
+        if (!preBufferEnabled) return
+        val lookup = stationLookup ?: return
+        serviceScope.launch {
+            val all = lookup.getAllStations().filter { it.isOnlineAt(userZoneId) }
+            if (all.isEmpty()) return@launch
+
+            // Warm the 3 stations after the current one (Next direction).
+            val currentIndex = all.indexOfFirst { it.id == repository.currentStationId.value }
+            if (currentIndex != -1) {
+                for (i in 1..BurstBufferProxy.PRE_BUFFER_COUNT) {
+                    all[(currentIndex + i).mod(all.size)].let { warmStation(it) }
+                }
+            }
+
+            // Warm the pre-decided shuffle queue (first 3 entries, minus
+            // anything already playing).
+            val app = application as StaticRadioApp
+            val queue = app.settingsRepository.shuffleQueue.first()
+                .filter { it != repository.currentStationId.value }
+                .take(BurstBufferProxy.PRE_BUFFER_COUNT)
+            ensureShuffleQueue()
+            queue.forEach { id -> all.firstOrNull { it.id == id }?.let { warmStation(it) } }
+        }
+    }
+
+    /**
+     * The shuffle queue: when pre-buffering, random picks come from a
+     * pre-decided persisted queue so they can be warmed ahead of time.
+     * Topped back up to PRE_BUFFER_COUNT entries (online, non-current,
+     * non-duplicate) whenever it runs low; entries are consumed as they play.
+     */
+    private suspend fun ensureShuffleQueue() {
+        if (!preBufferEnabled) return
+        val app = application as StaticRadioApp
+        val lookup = stationLookup ?: return
+        val current = repository.currentStationId.value
+        var queue: List<String> = app.settingsRepository.shuffleQueue.first().filter { it != current }
+        if (queue.size < BurstBufferProxy.PRE_BUFFER_COUNT) {
+            val onlineIds: List<String> = lookup.getAllStations().filter { it.isOnlineAt(userZoneId) && it.id != current }.map { it.id }
+            val remaining: List<String> = onlineIds.filter { it !in queue.toSet() }
+            queue = (queue + remaining.shuffled().take(BurstBufferProxy.PRE_BUFFER_COUNT)).distinct()
+                .take(BurstBufferProxy.PRE_BUFFER_COUNT)
+            app.settingsRepository.setShuffleQueue(queue)
+        }
+    }
+
+    /** Warm one station's ring buffer through the shadow proxy (no-op when off). */
+    private fun warmStation(station: StationRef) {
+        if (!preBufferEnabled) return
+        serviceScope.launch {
+            val contentType = sniffedContentTypes[station.streamUrl]
+            burstBufferProxy.preBuffer(station.streamUrl, contentType)
+        }
+    }
+
+    /**
+     * Rewrites a stream URL to this device's LAN proxy URL when pre-buffering
+     * is on AND a cast session is active — the only case the receiver (not
+     * the local player) fetches the stream. Local playback always uses the
+     * origin URL untouched.
+     */
+    private fun castUrlFor(streamUrl: String): String =
+        if (preBufferEnabled && castPlayer != null) {
+            burstBufferProxy.lanUrlFor(streamUrl) ?: streamUrl
+        } else streamUrl
 
     fun togglePlayPause() {
         val target = mediaSession.player
@@ -1013,8 +1164,26 @@ class RadioPlaybackService : MediaLibraryService() {
         val streamUrl: String,
         val title: String,
         val imageUrl: String?,
-        val isFavorite: Boolean = false
-    )
+        val isFavorite: Boolean = false,
+        val countryCode: String? = null,
+        val liveTimesFrom: String? = null,
+        val liveTimesTo: String? = null,
+        val is24x7: Boolean = false
+    ) {
+        /**
+         * Online/Offline per the user-defined live window (see
+         * StationLiveWindow). Stations without defined times are always
+         * Online — only genuinely time-windowed stations can be Offline.
+         */
+        fun isOnlineAt(zoneId: java.time.ZoneId): Boolean =
+            com.staticradio.app.data.StationLiveWindow.isOnline(
+                liveTimesFrom = liveTimesFrom,
+                liveTimesTo = liveTimesTo,
+                is24x7 = is24x7,
+                stationCountryCode = countryCode,
+                userZoneId = zoneId
+            )
+    }
 
     companion object {
         const val BROWSE_ROOT_ID = "static_radio_root"

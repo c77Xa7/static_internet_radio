@@ -64,13 +64,20 @@ fun MixesScreen(
     gridOpacity: Float = 1f,
     modifier: Modifier = Modifier
 ) {
-    val viewModel: MixesViewModel = viewModel(factory = MixesViewModel.Factory(mixDao))
+    val viewModel: MixesViewModel = viewModel(
+        factory = MixesViewModel.Factory(
+            mixDao,
+            (LocalContext.current.applicationContext as com.staticradio.app.StaticRadioApp).settingsRepository
+        )
+    )
     val filter by viewModel.filter.collectAsState()
     val genres by viewModel.genres.collectAsState()
     val moods by viewModel.moods.collectAsState()
     val styles by viewModel.styles.collectAsState()
     val mixes by viewModel.mixes.collectAsState()
+    val nameSearch by viewModel.nameSearch.collectAsState()
     var showFilterDialog by remember { mutableStateOf(false) }
+    var showSearchBar by remember { mutableStateOf(false) }
     val filterActive = filter.favoritesOnly || filter.genre != null || filter.mood != null || filter.style != null
     val context = LocalContext.current
 
@@ -102,11 +109,24 @@ fun MixesScreen(
             onMixesClick = {},
             onFilterClick = { showFilterDialog = true },
             filterActive = filterActive,
+            onSearchClick = {
+                showSearchBar = !showSearchBar
+                if (!showSearchBar) viewModel.setNameSearch("")
+            },
+            searchActive = showSearchBar,
             onAddClick = onAddMix,
             onSettingsClick = onSettingsClick,
             subtitle = "// saved mixes",
             onBackClick = onBack
         )
+
+        if (showSearchBar) {
+            com.staticradio.app.ui.common.NameSearchBar(
+                query = nameSearch,
+                onQueryChange = viewModel::setNameSearch,
+                placeholder = "Search mixes by title"
+            )
+        }
 
         val lineColor = MaterialTheme.colorScheme.primary
         val backgroundModifier = if (showBackgroundGrid) {
@@ -239,27 +259,43 @@ private fun MixFilterDialog(
         textContentColor = MaterialTheme.colorScheme.onSurface,
         title = { Text("Filter") },
         text = {
+            // Text search across every chip label — same pattern as the
+            // stations filter dialog.
+            var searchQuery by remember { mutableStateOf("") }
+            val matches: (String) -> Boolean = { label ->
+                searchQuery.isBlank() || label.contains(searchQuery.trim(), ignoreCase = true)
+            }
             Column {
+                androidx.compose.material3.OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("Search filters", style = MaterialTheme.typography.labelMedium) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)
+                )
                 MixFilterSection(title = "Favourites") {
                     MixFilterChip(label = "★ Favourites", active = filter.favoritesOnly, onClick = onFavoritesClick)
                 }
                 MixFilterSection(title = "Genre") {
-                    if (genres.isEmpty()) {
+                    val visible = genres.filter(matches)
+                    if (visible.isEmpty()) {
                         Text("No genres yet", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    genres.forEach { genre -> MixFilterChip(label = genre, active = genre == filter.genre, onClick = { onGenreClick(genre) }) }
+                    visible.forEach { genre -> MixFilterChip(label = genre, active = genre == filter.genre, onClick = { onGenreClick(genre) }) }
                 }
                 MixFilterSection(title = "Mood") {
-                    if (moods.isEmpty()) {
+                    val visible = moods.filter(matches)
+                    if (visible.isEmpty()) {
                         Text("No moods yet", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    moods.forEach { mood -> MixFilterChip(label = mood, active = mood == filter.mood, onClick = { onMoodClick(mood) }) }
+                    visible.forEach { mood -> MixFilterChip(label = mood, active = mood == filter.mood, onClick = { onMoodClick(mood) }) }
                 }
                 MixFilterSection(title = "Style") {
-                    if (styles.isEmpty()) {
+                    val visible = styles.filter(matches)
+                    if (visible.isEmpty()) {
                         Text("No styles yet", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    styles.forEach { style -> MixFilterChip(label = style, active = style == filter.style, onClick = { onStyleClick(style) }) }
+                    visible.forEach { style -> MixFilterChip(label = style, active = style == filter.style, onClick = { onStyleClick(style) }) }
                 }
             }
         },

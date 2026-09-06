@@ -35,6 +35,42 @@ data model, and build details.
 
 ## Changelog
 
+### v1.5
+- **Cast pre-buffering** (Settings → Cast → Pre-buffer, off by default) —
+  keeps a ready-made buffer of the next 3 stations (the ones "Next" would
+  play) and the next 3 random stations (the ones "Shuffle" would play), so
+  casting to a Chromecast starts near-instantly instead of stalling ~15
+  seconds. Uses extra data: each upcoming station is fetched a second time
+  in the background, which the Settings copy warns about. The ~15s cast
+  stall itself was root-caused as Icecast's burst-on-connect behaviour (the
+  receiver waits until it holds ~256KB, at whatever rate the server feeds
+  it) — the pre-buffer clears that appetite at LAN speed instead
+- **Online/Offline indicator** — stations with user-defined broadcast hours
+  now show a green/red light and ONLINE/OFFLINE on their card (24/7
+  stations always show ONLINE). Offline stations are skipped by Next,
+  Previous and Shuffle — only stations that are currently on-air or have
+  no defined hours are picked
+- **Time zone setting** (Settings → Region & time) — a searchable picker of
+  every IANA zone, used to convert each station's broadcast hours from its
+  own country's clock into yours when deciding Online/Offline. Defaults to
+  the device's zone
+- **Name search** — a new magnifier button next to Filter (joined into the
+  same segmented control as the list/grid/map buttons) on the station
+  list/grid/map screens and Saved Mixes. Searches station names and mix
+  titles directly, and composes with the attribute filters
+- **Filter search** — the Filter dialog on both stations and mixes now has
+  a search field, so large genre/country/mood/style vocabularies stay
+  findable
+- **Reordering** (Settings → Ordering) — reorder stations and mixes with
+  up/down arrows. Favourites stay pinned as their own top section (you
+  reorder within it), with everything else reorderable below
+- **Default startup screen** (Settings → Startup) — choose whether the app
+  opens on the station list, station grid, station map, or Saved Mixes
+- Map tiles switched from CARTO Voyager to standard OpenStreetMap — CARTO
+  began requiring API keys for their free raster basemaps and was
+  watermarking tiles with "API key required"
+- Uniform vertical spacing across all Settings sections
+
 ### v1.4
 - **Fixed Android Auto playing silently** — the app never actually requested
   audio focus, so the car kept its media channel closed and playback ran

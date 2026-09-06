@@ -13,6 +13,7 @@ import com.staticradio.app.data.local.StationDao
 import com.staticradio.app.data.local.TagEntity
 import com.staticradio.app.data.local.TagType
 import com.staticradio.app.data.settings.AccentColor
+import com.staticradio.app.data.settings.DefaultDestination
 import com.staticradio.app.data.settings.ImageShape
 import com.staticradio.app.data.settings.SettingsRepository
 import com.staticradio.app.data.settings.ThemeMode
@@ -21,8 +22,16 @@ import com.staticradio.app.playback.RadioController
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+/** Applies a saved ID order: known IDs first (in saved order), then the rest in natural order. */
+private fun <T> applySavedOrder(list: List<T>, savedOrder: List<String>, idOf: (T) -> String): List<T> {
+    if (savedOrder.isEmpty()) return list
+    val rank = savedOrder.withIndex().associate { (i, id) -> id to i }
+    return list.sortedBy { rank[idOf(it)] ?: Int.MAX_VALUE }
+}
 
 class SettingsViewModel(
     private val settingsRepository: SettingsRepository,
@@ -58,6 +67,12 @@ class SettingsViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.staticradio.app.data.settings.DEFAULT_BUFFER_SECONDS)
     val castEnabled: StateFlow<Boolean> = settingsRepository.castEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+    val castPreBuffer: StateFlow<Boolean> = settingsRepository.castPreBuffer
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+    val timeZoneId: StateFlow<String> = settingsRepository.timeZoneId
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "")
+    val defaultDestination: StateFlow<DefaultDestination> = settingsRepository.defaultDestination
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), DefaultDestination.STATION_LIST)
 
     val genreVocabulary: StateFlow<List<TagEntity>> = stationDao.observeTagsByType(TagType.GENRE)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -79,6 +94,79 @@ class SettingsViewModel(
     fun resetGridDefaults() = viewModelScope.launch { settingsRepository.resetGridDefaults() }
     fun setBufferSeconds(value: Int) = viewModelScope.launch { settingsRepository.setBufferSeconds(value) }
     fun setCastEnabled(enabled: Boolean) = viewModelScope.launch { settingsRepository.setCastEnabled(enabled) }
+    fun setCastPreBuffer(enabled: Boolean) = viewModelScope.launch { settingsRepository.setCastPreBuffer(enabled) }
+    fun setTimeZoneId(value: String) = viewModelScope.launch { settingsRepository.setTimeZoneId(value) }
+    fun setDefaultDestination(value: DefaultDestination) = viewModelScope.launch { settingsRepository.setDefaultDestination(value) }
+
+    // ---- Reordering ----
+
+    // Raw DAO snapshots for the reorder screens, exposed as one-shot loads —
+    // the reorder UI holds its own working copy and commits the whole order
+    // on save, so a live Flow would fight with in-flight edits.
+    private val _stationReorderList = MutableStateFlow<List<StationReorderItem>>(emptyList())
+    val stationReorderList: StateFlow<List<StationReorderItem>> = _stationReorderList
+
+    private val _mixReorderList = MutableStateFlow<List<MixReorderItem>>(emptyList())
+    val mixReorderList: StateFlow<List<MixReorderItem>> = _mixReorderList
+
+    data class StationReorderItem(val id: String, val title: String, val isFavorite: Boolean)
+    data class MixReorderItem(val id: String, val title: String, val isFavorite: Boolean)
+
+    fun loadStationOrder() {
+        viewModelScope.launch {
+            val savedOrder = settingsRepository.stationOrder.first()
+            _stationReorderList.value = stationDao.getAllStationsOnce()
+                .map { StationReorderItem(it.id, it.nameOverride ?: it.nameSource ?: "Unknown station", it.isFavorite) }
+                // Favourites block first, then everything else — within each
+                // block the saved order wins. Without the favourite-first sort
+                // the raw DAO order interleaved the two sections. The final
+                // stable re-sort also guards against saved ranks pulling a
+                // rank-less favourite below a ranked non-favourite.
+                .let { applySavedOrder(it, savedOrder) { item: StationReorderItem -> item.id } }
+                .sortedByDescending { it.isFavorite }
+        }
+    }
+
+    fun loadMixOrder() {
+        viewModelScope.launch {
+            val savedOrder = settingsRepository.mixOrder.first()
+            _mixReorderList.value = mixDao.getAllMixesOnce()
+                .map { MixReorderItem(it.id, it.fullTitle ?: it.url, it.isFavorite) }
+                .let { applySavedOrder(it, savedOrder) { item: MixReorderItem -> item.id } }
+                .sortedByDescending { it.isFavorite }
+        }
+    }
+
+    fun moveStation(fromIndex: Int, toIndex: Int) {
+        _stationReorderList.value = _stationReorderList.value.toMutableList()
+            .apply { add(toIndex, removeAt(fromIndex)) }
+    }
+
+    fun moveMix(fromIndex: Int, toIndex: Int) {
+        _mixReorderList.value = _mixReorderList.value.toMutableList()
+            .apply { add(toIndex, removeAt(fromIndex)) }
+    }
+
+    /**
+     * Commits the working order. Favourites stay a contiguous top block and
+     * non-favourites stay below — the UI only lets the user reorder *within*
+     * each section, so this just persists both sections' internal orders.
+     */
+    fun saveStationOrder() {
+        viewModelScope.launch {
+            val items = _stationReorderList.value
+            settingsRepository.setStationOrder(items.map { it.id })
+            _importExportMessage.value = "Station order saved"
+        }
+    }
+
+    fun saveMixOrder() {
+        viewModelScope.launch {
+            val items = _mixReorderList.value
+            settingsRepository.setMixOrder(items.map { it.id })
+            _importExportMessage.value = "Mix order saved"
+        }
+    }
 
     fun setNewTagName(value: String) { _newTagName.value = value }
 

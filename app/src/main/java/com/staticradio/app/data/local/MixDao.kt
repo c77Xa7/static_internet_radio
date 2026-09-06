@@ -27,6 +27,9 @@ interface MixDao {
     @Query("SELECT * FROM mixes WHERE id = :mixId")
     suspend fun getMixWithTracks(mixId: String): MixWithTracks?
 
+    @Query("SELECT * FROM mixes")
+    suspend fun getAllMixesOnce(): List<MixEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMix(mix: MixEntity)
 

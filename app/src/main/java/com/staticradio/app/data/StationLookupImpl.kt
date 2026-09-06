@@ -24,7 +24,11 @@ class StationLookupImpl(private val stationDao: StationDao) : RadioPlaybackServi
         streamUrl = streamUrl,
         title = nameOverride ?: nameSource ?: "Unknown station",
         imageUrl = imageOverride ?: imageSource,
-        isFavorite = isFavorite
+        isFavorite = isFavorite,
+        countryCode = countryCodeOverride ?: countryCodeSource,
+        liveTimesFrom = liveTimesFrom,
+        liveTimesTo = liveTimesTo,
+        is24x7 = is24x7
     )
 
     override suspend fun updateNowPlayingCache(stationId: String, text: String) {
