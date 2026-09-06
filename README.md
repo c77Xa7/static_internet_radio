@@ -35,6 +35,19 @@ data model, and build details.
 
 ## Changelog
 
+### v1.5.1
+- **One backup for everything** — Export/Import in Settings → Backup now
+  covers stations, mixes, tracklists, the full Genre/Mood/Style
+  vocabularies and locally-uploaded images in a single zip. The separate
+  stations-only and mixes-only export/import buttons are gone; older
+  backup files still import (everything they contain is restored)
+- **Fixed live broadcast hours being dropped by backups** — live times
+  and the 24/7 flag never made it into exported files, so they vanished
+  on any restore
+- **Fixed genres importing inconsistently** — the station export query
+  wasn't wrapped in a transaction, so attached genre tags could
+  intermittently come back missing
+
 ### v1.5
 - **Cast pre-buffering** (Settings → Cast → Pre-buffer, off by default) —
   keeps a ready-made buffer of the next 3 stations (the ones "Next" would

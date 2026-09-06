@@ -123,14 +123,6 @@ fun SettingsScreen(
         ActivityResultContracts.OpenDocument()
     ) { uri -> uri?.let { viewModel.import(context, it) } }
 
-    val exportMixesLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/zip")
-    ) { uri -> uri?.let { viewModel.exportMixes(context.contentResolver, it) } }
-
-    val importMixesLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri -> uri?.let { viewModel.importMixes(context, it) } }
-
     LaunchedEffect(message) {
         if (message != null) {
             delay(3000)
@@ -358,11 +350,7 @@ fun SettingsScreen(
         // ---- Backup ----
         SettingsCategory(title = "Backup") {
             Text(
-                "Radio stations",
-                style = MaterialTheme.typography.labelLarge
-            )
-            Text(
-                "Backs up every station field — genre/mood/style, coordinates, description, language, popularity — plus your full Genre/Mood/Style vocabularies. A Transistor export can still be imported directly, but Transistor's format doesn't carry those extra fields.",
+                "One backup, everything: all stations (every field — genre/mood/style, live broadcast hours, coordinates, description, language, popularity), all saved mixes with their tracklists, the full Genre/Mood/Style vocabularies, and any locally-uploaded images.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -376,23 +364,10 @@ fun SettingsScreen(
                 }
             }
             Text(
-                "Saved mixes",
-                style = MaterialTheme.typography.labelLarge
-            )
-            Text(
-                "STATIC's own zip format — export bundles the tracklist and any locally-uploaded images.",
+                "Imports from older STATIC backups (stations-only or mixes-only) still work — everything each of those files contains is restored.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = {
-                    val timestamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
-                    exportMixesLauncher.launch("static-mixes_$timestamp.zip")
-                }) { Text("Export") }
-                OutlinedButton(onClick = { importMixesLauncher.launch(arrayOf("*/*")) }) {
-                    Text("Import")
-                }
-            }
         }
 
         KofiButton(onClick = {

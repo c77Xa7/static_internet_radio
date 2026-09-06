@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.staticradio.app.data.backup.BackupManager
+import com.staticradio.app.data.backup.FullBackupManager
 import com.staticradio.app.data.backup.MixBackupManager
 import com.staticradio.app.data.local.MixDao
 import com.staticradio.app.data.local.StationDao
@@ -43,6 +44,7 @@ class SettingsViewModel(
 
     private val backupManager = BackupManager(stationDao)
     private val mixBackupManager = MixBackupManager(mixDao)
+    private val fullBackupManager = FullBackupManager(stationDao, mixDao)
 
     val sleepTimerEndAtMillis: StateFlow<Long?> = playbackRepository.sleepTimerEndAtMillis
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
@@ -189,8 +191,8 @@ class SettingsViewModel(
     fun export(contentResolver: ContentResolver, uri: Uri) {
         viewModelScope.launch {
             _importExportMessage.value = try {
-                backupManager.export(contentResolver, uri)
-                "Exported successfully"
+                fullBackupManager.export(contentResolver, uri)
+                "Backup exported successfully"
             } catch (e: Exception) {
                 "Export failed"
             }
@@ -200,32 +202,10 @@ class SettingsViewModel(
     fun import(context: Context, uri: Uri) {
         viewModelScope.launch {
             _importExportMessage.value = try {
-                val count = backupManager.import(context, uri)
-                "Imported $count station(s)"
+                val result = fullBackupManager.import(context, uri)
+                "Imported ${result.stations} station(s) and ${result.mixes} mix(es)"
             } catch (e: Exception) {
-                "Import failed — check the file is a Transistor or STATIC backup zip"
-            }
-        }
-    }
-
-    fun exportMixes(contentResolver: ContentResolver, uri: Uri) {
-        viewModelScope.launch {
-            _importExportMessage.value = try {
-                mixBackupManager.export(contentResolver, uri)
-                "Mixes exported successfully"
-            } catch (e: Exception) {
-                "Mix export failed"
-            }
-        }
-    }
-
-    fun importMixes(context: Context, uri: Uri) {
-        viewModelScope.launch {
-            _importExportMessage.value = try {
-                val count = mixBackupManager.import(context, uri)
-                "Imported $count mix(es)"
-            } catch (e: Exception) {
-                "Mix import failed — check the file is a STATIC mixes backup zip"
+                "Import failed — check the file is a STATIC backup zip"
             }
         }
     }

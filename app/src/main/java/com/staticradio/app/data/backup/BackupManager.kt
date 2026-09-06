@@ -45,7 +45,12 @@ private data class StationExport(
     val popularityTier: String? = null,
     val dateAddedEpochMillis: Long,
     val mood: String? = null,
-    val style: String? = null
+    val style: String? = null,
+    // User-defined broadcast hours — added in v1.5.1 (they were silently
+    // dropped by every earlier export, so older backups can't carry them).
+    val liveTimesFrom: String? = null,
+    val liveTimesTo: String? = null,
+    val is24x7: Boolean = false
 )
 
 @Serializable
@@ -106,7 +111,10 @@ class BackupManager(private val stationDao: StationDao) {
                 popularityTier = entity.popularityTier,
                 dateAddedEpochMillis = entity.dateAddedEpochMillis,
                 mood = entity.mood,
-                style = entity.style
+                style = entity.style,
+                liveTimesFrom = entity.liveTimesFrom,
+                liveTimesTo = entity.liveTimesTo,
+                is24x7 = entity.is24x7
             )
         }
 
@@ -220,7 +228,10 @@ class BackupManager(private val stationDao: StationDao) {
                         nowPlayingCache = null,
                         dateAddedEpochMillis = s.dateAddedEpochMillis,
                         mood = s.mood,
-                        style = s.style
+                        style = s.style,
+                        liveTimesFrom = s.liveTimesFrom,
+                        liveTimesTo = s.liveTimesTo,
+                        is24x7 = s.is24x7
                     )
                 )
 
